@@ -271,7 +271,7 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			}
 			submitted := make(chan workerFailureResult, 1)
 			go func() {
-				resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+				resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
 					JobId: jobID, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000,
 				})
 				submitted <- workerFailureResult{resp: resp, err: err}
@@ -308,7 +308,10 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 						map[string]string{"source": "submit", "reason": string(tc.rejectReason)}, 1)
 				}
 				assertIntegrationHistogram(t, before, "dzkr_zk_verification_duration_seconds", nil, tc.verifyCount-1)
-				for _, record := range store.savedRecords() {
+				for i, record := range store.savedRecords() {
+					if i == 0 && record == (JobRecord{JobID: jobID, State: JobQueued, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000}) {
+						continue
+					}
 					if record.State != JobRunning {
 						t.Fatalf("rejected Attempt 1 persisted a terminal state: %+v", record)
 					}
@@ -357,11 +360,11 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 				assertIntegrationHistogram(t, scrapeIntegrationMetrics(t, secondMetrics.url), "dzkr_zk_proving_duration_seconds", nil, 1)
 			}
 			writes := store.savedRecords()
-			if len(writes) != wantAttempts+1 {
+			if len(writes) != wantAttempts+2 || writes[0] != (JobRecord{JobID: jobID, State: JobQueued, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000}) {
 				t.Fatalf("durable writes=%+v", writes)
 			}
 			for i := 0; i < wantAttempts; i++ {
-				if writes[i].State != JobRunning || writes[i].AttemptID != int64(i+1) {
+				if writes[i+1].State != JobRunning || writes[i+1].AttemptID != int64(i+1) {
 					t.Fatalf("invalid Running progression: %+v", writes)
 				}
 			}
@@ -372,6 +375,7 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			assertRecoveryRecord(t, store, JobRecord{
 				JobID: jobID, State: JobSucceeded, AttemptID: int64(wantAttempts), WorkerID: wantWorker,
 				TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000,
+				HasWorkerResult: true, Output: storedProofOutput(t, store, jobID, fixture),
 			})
 		})
 	}
@@ -519,6 +523,7 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	running2.AttemptID, running2.WorkerID = 2, "recovered-worker"
 	succeeded2 := running2
 	succeeded2.State = JobSucceeded
+	succeeded2 = withWorkerResult(succeeded2, storedProofOutput(t, store, jobID, fixture), "")
 	assertWorkerFailureSaves(t, store, []JobRecord{recovering1, running2, succeeded2})
 	assertRecoveryRecord(t, store, succeeded2)
 	assertRecoveryOwnershipReleased(t, s, jobID)
@@ -546,14 +551,14 @@ func TestPrometheusMetricsRecoveryRepair(t *testing.T) {
 					}
 					return inner.Load(id)
 				},
-				save: func(got JobRecord) error {
-					if mode == "repair Save fails" && got.State == JobRecovering {
-						return errors.New("injected repair Save failure")
+				recoverRunning: func(got JobRecord) (bool, error) {
+					if mode == "repair Save fails" {
+						return false, errors.New("injected conditional repair failure")
 					}
-					return inner.Save(got)
+					return inner.TryRecoverRunning(got)
 				},
 			}
-			s := &CoordinatorServer{jobStore: store, metrics: coordinatorMetrics.backend}
+			s := &CoordinatorServer{jobStore: store, metrics: coordinatorMetrics.backend, lifecycle: newCoordinatorLifecycle()}
 			client := startTestCoordinator(t, s)
 			var calls atomic.Int32
 			startWorkerFailureServer(t, client, "worker", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
@@ -591,7 +596,7 @@ func TestPrometheusMetricsRecoveryRepair(t *testing.T) {
 				assertIntegrationCounter(t, view, "dzkr_recovery_repair_failures_total", map[string]string{"stage": stage}, wantFailure)
 			}
 			assertRecoveryRecord(t, inner, want)
-			assertRecoveryOwnershipReleased(t, s, record.JobID)
+			assertQueuedSessionReleased(t, s, record.JobID, mode != "repair succeeds")
 			if calls.Load() != 2 {
 				t.Fatalf("RPC calls=%d, want 2", calls.Load())
 			}

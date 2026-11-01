@@ -25,11 +25,11 @@ func TestCoordinatorTimeoutValidationBeforeSideEffects(t *testing.T) {
 		return successfulResult(req), nil
 	})
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	for _, ms := range []int64{0, -1, math.MinInt64, 9223372036855, 1 << 58, 1<<58 + 1, math.MaxInt64} {
 		t.Run(fmt.Sprint(ms), func(t *testing.T) {
 			before := f.snapshot()
-			resp, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 12101, TaskType: "hash", Payload: "hello", TimeoutMs: ms})
+			resp, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 12101, TaskType: "hash", Payload: "hello", TimeoutMs: ms})
 			if resp != nil || status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("timeout=%d response=%v error=%v", ms, resp, err)
 			}
@@ -41,7 +41,7 @@ func TestCoordinatorTimeoutValidationBeforeSideEffects(t *testing.T) {
 		t.Fatal("cannot preclaim")
 	}
 	before := f.snapshot()
-	if _, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 12101, TimeoutMs: 0}); status.Code(err) != codes.InvalidArgument {
+	if _, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 12101, TimeoutMs: 0}); status.Code(err) != codes.InvalidArgument {
 		t.Fatal("ownership preceded validation")
 	}
 	f.assertUnchanged(t, before, 12101)
@@ -50,7 +50,7 @@ func TestCoordinatorTimeoutValidationBeforeSideEffects(t *testing.T) {
 		t.Fatal("invalid timeout dispatched")
 	}
 	for _, ms := range []int64{1, 5000, 9223372036854} {
-		resp, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: ms, TaskType: "hash", Payload: "hello", TimeoutMs: ms})
+		resp, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: ms, TaskType: "hash", Payload: "hello", TimeoutMs: ms})
 		if err != nil || resp.GetStatus() != "Succeeded" || resp.GetAttemptId() != 1 {
 			t.Fatalf("valid timeout=%d response=%v error=%v", ms, resp, err)
 		}
@@ -144,7 +144,7 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	submissionFinished := make(chan struct{})
 	go func() {
 		defer close(submissionFinished)
-		r, err := f.s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 12120, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250})
+		r, err := f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 12120, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250})
 		done <- workerFailureResult{r, err}
 	}()
 	t.Cleanup(func() {
@@ -189,20 +189,35 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	case <-ctx.Done():
 		t.Fatal("late task did not finish")
 	}
-	want := JobRecord{JobID: 12120, State: JobCancelled, AttemptID: 1, WorkerID: "worker-a", TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250}
+	want := JobRecord{JobID: 12120, State: JobCancelled, AttemptID: 1, WorkerID: "worker-a", TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250, HasWorkerResult: true, Error: context.DeadlineExceeded.Error()}
 	assertRecoveryRecord(t, f.store, want)
 	if calls.Load() != 1 || f.observer.count("verification", "") != 0 || f.observer.count("started", "") != 1 || proving.samples.Load() != 1 {
 		t.Fatal("task Cancelled was retried, verified or double-counted")
 	}
 	assertRecoveryOwnershipReleased(t, f.s, want.JobID)
-	// Explicit resubmission has a new task budget and exactly the next generation.
-	r, err := f.s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: want.JobID, TaskType: want.TaskType, Payload: want.Payload, TimeoutMs: 5000})
-	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 2 || calls.Load() != 2 || f.observer.count("verification", "") != 1 {
-		t.Fatalf("resubmission: response=%v error=%v", r, err)
+	// A changed budget is now a spec conflict and must preserve the Cancelled result.
+	r, err := f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: want.JobID, TaskType: want.TaskType, Payload: want.Payload, TimeoutMs: 5000})
+	if r != nil || status.Code(err) != codes.AlreadyExists || calls.Load() != 1 {
+		t.Fatalf("changed-budget resubmission: response=%v error=%v", r, err)
 	}
-	want.State, want.AttemptID, want.TimeoutMs = JobSucceeded, 2, 5000
 	assertRecoveryRecord(t, f.store, want)
 	assertRecoveryOwnershipReleased(t, f.s, want.JobID)
+	// An equal-spec resubmission must also preserve the terminal generation.
+	r, err = f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: want.JobID, TaskType: want.TaskType, Payload: want.Payload, TimeoutMs: want.TimeoutMs})
+	if r != nil || status.Code(err) != codes.AlreadyExists || calls.Load() != 1 {
+		t.Fatalf("terminal duplicate: response=%v error=%v", r, err)
+	}
+	assertRecoveryRecord(t, f.store, want)
+	assertRecoveryOwnershipReleased(t, f.s, want.JobID)
+	// A different logical Job may run with a new relative execution budget.
+	r, err = f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: want.JobID + 1, TaskType: want.TaskType, Payload: want.Payload, TimeoutMs: 5000})
+	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 1 || calls.Load() != 2 || f.observer.count("verification", "") != 1 {
+		t.Fatalf("new job: response=%v error=%v", r, err)
+	}
+	newJob := withWorkerResult(want, r.Output, r.Error)
+	newJob.JobID, newJob.State, newJob.TimeoutMs = want.JobID+1, JobSucceeded, 5000
+	assertRecoveryRecord(t, f.store, newJob)
+	assertRecoveryRecord(t, f.store, want)
 	if f.observer.count("terminal", string(metrics.TerminalCancelled)) != 1 || f.observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 {
 		t.Fatal("unexpected terminal classification")
 	}

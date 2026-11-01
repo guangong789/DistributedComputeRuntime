@@ -117,7 +117,7 @@ func TestPreimageWitnessFileGRPCAndSQLite(t *testing.T) {
 	if len(publicFields) != 2 || publicFields["witness_ref"] == nil || publicFields["digest"] == nil {
 		t.Fatalf("payload exposes fields beyond witness_ref and digest: %v", publicFields)
 	}
-	resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+	resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
 		JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 5000,
 	})
 	if err != nil || resp == nil || resp.JobId != jobID || resp.AttemptId != 1 ||

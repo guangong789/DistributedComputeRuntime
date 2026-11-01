@@ -23,6 +23,7 @@ type Metrics struct {
 	recoveryFailures  *prom.CounterVec
 	repairFailures    *prom.CounterVec
 	jobDuration       *prom.HistogramVec
+	admissionDuration *prom.HistogramVec
 	attemptDuration   *prom.HistogramVec
 	recoveryDuration  *prom.HistogramVec
 	provingDuration   prom.Histogram
@@ -59,7 +60,8 @@ func New(registerer prom.Registerer) (*Metrics, error) {
 		recoveryChanges:   counter("recovery_transitions_total", "Durable Running to Recovering transitions.", "cause"),
 		recoveryFailures:  counter("recovery_execution_failures_total", "Recovery execution failures.", "reason"),
 		repairFailures:    counter("recovery_repair_failures_total", "Recovery repair persistence failures.", "stage"),
-		jobDuration:       prom.NewHistogramVec(histogramOptions("job_execution_duration_seconds", "Execution session duration, excluding earlier processes."), []string{"source"}),
+		jobDuration:       prom.NewHistogramVec(histogramOptions("job_execution_duration_seconds", "Coordinator execution session duration, excluding admission, queue waiting and earlier processes."), []string{"source"}),
+		admissionDuration: prom.NewHistogramVec(histogramOptions("job_admission_duration_seconds", "Atomic Create admission duration, excluding validation, duplicate prechecks and execution; store_error is uncertain."), []string{"outcome"}),
 		attemptDuration:   prom.NewHistogramVec(histogramOptions("attempt_duration_seconds", "Duration until an attempt is accepted or abandoned."), []string{"source", "outcome"}),
 		recoveryDuration:  prom.NewHistogramVec(histogramOptions("recovery_pass_duration_seconds", "Recovery scan duration."), []string{"outcome"}),
 		provingDuration:   prom.NewHistogram(histogramOptions("zk_proving_duration_seconds", "Time spent in actual preimage proving calls.")),
@@ -68,7 +70,7 @@ func New(registerer prom.Registerer) (*Metrics, error) {
 	m.collectors = []prom.Collector{
 		m.jobsSubmitted, m.jobsTerminal, m.attemptsStarted, m.attemptsFinished, m.attemptsRejected,
 		m.workerTransitions, m.recoveryPasses, m.recoveryChanges, m.recoveryFailures, m.repairFailures,
-		m.jobDuration, m.attemptDuration, m.recoveryDuration, m.provingDuration, m.verifyDuration,
+		m.jobDuration, m.admissionDuration, m.attemptDuration, m.recoveryDuration, m.provingDuration, m.verifyDuration,
 	}
 	if err := registerer.Register(m); err != nil {
 		return nil, fmt.Errorf("register runtime metrics: %w", err)
@@ -106,6 +108,12 @@ func validSource(source metrics.ExecutionSource) bool {
 func (m *Metrics) JobSubmitted(source metrics.ExecutionSource) {
 	if validSource(source) {
 		m.jobsSubmitted.WithLabelValues(string(source)).Inc()
+	}
+}
+
+func (m *Metrics) ObserveJobAdmission(outcome metrics.AdmissionOutcome, duration time.Duration) {
+	if duration >= 0 && oneOf(outcome, metrics.AdmissionAccepted, metrics.AdmissionConflict, metrics.AdmissionStoreError) {
+		m.admissionDuration.WithLabelValues(string(outcome)).Observe(duration.Seconds())
 	}
 }
 

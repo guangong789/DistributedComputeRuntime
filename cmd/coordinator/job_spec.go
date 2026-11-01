@@ -1,12 +1,38 @@
 package main
 
 import (
+	"fmt"
+
 	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// checkExistingSubmission is read-only. A local claim alone is not evidence of
+// durable admission. Legacy ZK equivalence classifies duplicates only; Save still
+// requires exact stored bytes and no result is replayed to an unbound caller.
+func (s *CoordinatorServer) checkExistingSubmission(spec JobSpec) error {
+	record, found, err := s.jobStore.Load(spec.JobID)
+	if err != nil {
+		return fmt.Errorf("load admitted job: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	stored := jobSpecFromRecord(record)
+	if stored != spec {
+		if stored.TaskType != "zk_preimage_prove" {
+			return ErrJobSpecConflict
+		}
+		canonical, err := validateJobSpec(stored)
+		if err != nil || canonical != spec {
+			return ErrJobSpecConflict
+		}
+	}
+	return errJobAlreadyAdmitted
+}
 
 // JobSpec is a value snapshot of a job's inputs. Execution treats it as immutable.
 type JobSpec struct {
@@ -41,8 +67,9 @@ func jobSpecFromRecord(record JobRecord) JobSpec {
 	}
 }
 
-// validateJobSpec returns a value snapshot. Raw RPC/legacy ZK JSON cannot reach
-// persistence or dispatch; other task types retain their existing payloads.
+// validateJobSpec returns a validated execution snapshot. SubmitJob persists its
+// normalized copy; recovery retains its exact stored spec for writes and uses
+// the normalized copy only for execution. Other task payloads remain unchanged.
 // Budgets must be explicit and representable: invalid legacy values require
 // operator correction rather than silently acquiring a default execution budget.
 func validateJobSpec(spec JobSpec) (JobSpec, error) {

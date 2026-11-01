@@ -54,13 +54,13 @@ func TestMTLSDispatchIdentityMismatchRetriesVerifiedWorker(t *testing.T) {
 	// selected logical Worker B points to the TLS server owned by Worker A.
 	registerMTLSExecutionWorker(t, f, workerBIdentity, "worker-b", address)
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-	response, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 11101, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: preimageTestTimeoutMs})
+	client := f.observingClient(t, testpki.Client)
+	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 11101, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: preimageTestTimeoutMs})
 	if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 2 {
 		t.Fatalf("expected retry to verified Worker A: %v", err)
 	}
-	assertWorkerFailureSaves(t, f.store, []JobRecord{
-		preimageRecord(11101, 1, "worker-b", JobRunning, fixture.payload), preimageRecord(11101, 2, "worker-a", JobRunning, fixture.payload), preimageRecord(11101, 2, "worker-a", JobSucceeded, fixture.payload),
+	assertAdmittedWorkerFailureSaves(t, f.store, []JobRecord{
+		preimageRecord(11101, 1, "worker-b", JobRunning, fixture.payload), preimageRecord(11101, 2, "worker-a", JobRunning, fixture.payload), withWorkerResult(preimageRecord(11101, 2, "worker-a", JobSucceeded, fixture.payload), response.Output, ""),
 	})
 	if calls.Load() != 1 || proving.samples.Load() != 1 || f.observer.count("verification", "") != 1 || f.observer.count("finished", string(metrics.AttemptRPCError)) != 1 || f.observer.count("finished", string(metrics.AttemptAccepted)) != 1 || f.observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 || f.observer.count("terminal", string(metrics.TerminalFailed)) != 0 {
 		t.Fatal("identity mismatch reached execution, became a business failure, or fabricated success/proving metrics")
@@ -128,13 +128,13 @@ func TestMTLSDispatchRejectsBadEndpointsAsInfrastructureAttempts(t *testing.T) {
 			// mandatory checks, independent of the registration SAN gate.
 			f.s.workers = map[string]WorkerInfo{"worker-a": {ID: "worker-a", Address: address, Status: WorkerAlive, LastSeen: time.Now()}}
 			f.s.workerOrder = []string{"worker-a"}
-			client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-			response, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 11102, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
-			if response != nil || status.Code(err) != codes.Unavailable {
-				t.Fatalf("transport failure classified as task result: %v", err)
+			client := f.observingClient(t, testpki.Client)
+			response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 11102, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+			if err != nil || response.GetStatus() != "Failed" || response.GetAttemptId() != 2 {
+				t.Fatalf("exhausted asynchronous execution did not become Failed: %v, %v", response, err)
 			}
 			writes := f.store.savedRecords()
-			if len(writes) != 3 || writes[0].State != JobRunning || writes[0].AttemptID != 1 || writes[1].State != JobRunning || writes[1].AttemptID != 2 || writes[2].State != JobFailed || writes[2].AttemptID != 2 || calls.Load() != 0 {
+			if len(writes) != 4 || !isUnattemptedQueued(writes[0]) || writes[1].State != JobRunning || writes[1].AttemptID != 1 || writes[2].State != JobRunning || writes[2].AttemptID != 2 || writes[3].State != JobFailed || writes[3].AttemptID != 2 || writes[3].HasWorkerResult || calls.Load() != 0 {
 				t.Fatal("failed authentication executed a handler or failed to finalize the session")
 			}
 			if f.observer.count("started", "") != 2 || f.observer.count("finished", string(metrics.AttemptRPCError)) != 2 || f.observer.count("terminal", "") != 1 || f.observer.count("terminal", string(metrics.TerminalFailed)) != 1 {
@@ -202,9 +202,9 @@ func TestMTLSReregistrationCannotBypassDispatchIdentity(t *testing.T) {
 		return successfulResult(r), nil
 	})
 	worker := registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", first)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	ctx := mtlsContext(t)
-	if r, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 11104, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}); err != nil || r.GetStatus() != "Succeeded" {
+	if r, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 11104, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}); err != nil || r.GetStatus() != "Succeeded" {
 		t.Fatal("initial verified endpoint failed")
 	}
 	other := startMTLSBackend(t, f, workerBIdentity, func(_ context.Context, r *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
@@ -215,7 +215,7 @@ func TestMTLSReregistrationCannotBypassDispatchIdentity(t *testing.T) {
 		t.Fatal("legitimate same-host endpoint update rejected")
 	}
 	req := &runtimepb.SubmitJobRequest{JobId: 11105, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}
-	if r, err := client.SubmitJob(ctx, req); err == nil || r != nil || wrongCalls.Load() != 0 {
+	if r, err := submitAndObserveForTest(ctx, client, req); err != nil || r.GetStatus() != "Failed" || r.GetAttemptId() != 2 || wrongCalls.Load() != 0 {
 		t.Fatal("endpoint replacement changed the expected logical identity")
 	}
 	record, ok, err := f.store.Load(11105)
@@ -228,9 +228,17 @@ func TestMTLSReregistrationCannotBypassDispatchIdentity(t *testing.T) {
 	if r, err := worker.RegisterWorker(ctx, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: replacement}); err != nil || !r.GetAccepted() {
 		t.Fatal(err)
 	}
-	r, err := client.SubmitJob(ctx, req)
-	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 3 {
-		t.Fatalf("verified replacement did not continue attempt generation: %v", err)
+	r, err := submitAndObserveForTest(ctx, client, req)
+	if r != nil || status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("re-registration restarted a terminal JobID: %v", err)
+	}
+	assertRecoveryRecord(t, f.store, record)
+	// A new logical job can use the verified replacement without rebinding the
+	// old failed job or weakening the endpoint/Worker identity assertions.
+	req.JobId = 11115
+	r, err = submitAndObserveForTest(ctx, client, req)
+	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 1 {
+		t.Fatalf("verified replacement rejected a new job: %v", err)
 	}
 	_, _, order := coordinatorWorkerSnapshot(f.s, "worker-a")
 	if !reflect.DeepEqual(order, []string{"worker-a"}) || wrongCalls.Load() != 0 {
@@ -295,6 +303,7 @@ func TestMTLSTimedRecoveryAfterProvingCapacityReturns(t *testing.T) {
 	stop()
 	want.State = JobSucceeded
 	want.AttemptID = 10
+	want = withWorkerResult(want, storedProofOutput(t, f.store, record.JobID, fixture), "")
 	assertRecoveryRecord(t, f.store, want)
 	lease, ok := f.s.getLease(record.JobID)
 	if !ok || lease.AttemptID != 10 || lease.WorkerID != "worker-a" || calls.Load() != 3 || proving.samples.Load() != 1 || f.observer.count("verification", "") != 1 || f.observer.count("submitted", "") != 0 || len(q.entries) != 0 {

@@ -224,6 +224,7 @@ func TestRetryRecoveringJobStartsOneNewAttemptAndReleasesOwnership(t *testing.T)
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, "recovery-worker"
+	want = withWorkerResult(want, "done", "")
 	got, ok, err := s.jobStore.Load(record.JobID)
 	if err != nil || !ok || got != want {
 		t.Fatalf("persisted job=%+v found=%v error=%v, want %+v", got, ok, err, want)

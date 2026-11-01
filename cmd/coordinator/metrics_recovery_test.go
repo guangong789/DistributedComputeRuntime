@@ -15,27 +15,17 @@ import (
 )
 
 func TestMetricsRecoveryTransitionsFollowPersistence(t *testing.T) {
-	for _, scenario := range []string{"startup", "startup save failure", "repair", "repair load failure", "repair save failure", "compare skip"} {
+	for _, scenario := range []string{"startup", "startup save failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			observer := &recordingMetrics{}
 			inner := NewMemoryJobStore()
 			record := recoveringTestRecord()
 			record.State = JobRunning
-			if scenario == "compare skip" {
-				record.State = JobSucceeded
-			}
 			saveRecoveryRecord(t, inner, record)
 			wantErr := errors.New("injected persistence failure")
 			store := &recoveryPassStore{JobStore: inner,
-				load: func(id int64) (JobRecord, bool, error) {
-					if scenario == "repair load failure" {
-						observer.record(recordedMetric{name: "load_failed"})
-						return JobRecord{}, false, wantErr
-					}
-					return inner.Load(id)
-				},
 				save: func(got JobRecord) error {
-					if scenario == "startup save failure" || scenario == "repair save failure" {
+					if scenario == "startup save failure" {
 						observer.record(recordedMetric{name: "save_failed"})
 						return wantErr
 					}
@@ -47,32 +37,10 @@ func TestMetricsRecoveryTransitionsFollowPersistence(t *testing.T) {
 				},
 			}
 			s := &CoordinatorServer{jobStore: store, metrics: observer}
-			var err error
-			if scenario == "startup" || scenario == "startup save failure" {
-				err = s.recoverRunningJobs()
-			} else {
-				if !s.claimJob(record.JobID) {
-					t.Fatal("cannot claim repair job")
-				}
-				err = s.restoreRecoveringJob(record.JobID, record.AttemptID)
-				s.releaseJob(record.JobID)
-			}
+			err := s.recoverRunningJobs()
 			wantNames := []string{"recovering_saved", "transition"}
-			switch scenario {
-			case "startup save failure":
+			if scenario == "startup save failure" {
 				wantNames = []string{"save_failed"}
-			case "repair load failure":
-				wantNames = []string{"load_failed", "repair_failed"}
-				if observer.count("repair_failed", string(metrics.RepairLoad)) != 1 {
-					t.Fatal("missing repair Load failure event")
-				}
-			case "repair save failure":
-				wantNames = []string{"save_failed", "repair_failed"}
-				if observer.count("repair_failed", string(metrics.RepairSave)) != 1 {
-					t.Fatal("missing repair Save failure event")
-				}
-			case "compare skip":
-				wantNames = nil
 			}
 			var names []string
 			for _, event := range observer.snapshot() {
@@ -81,19 +49,15 @@ func TestMetricsRecoveryTransitionsFollowPersistence(t *testing.T) {
 			if !reflect.DeepEqual(names, wantNames) {
 				t.Fatalf("events=%v, want %v", names, wantNames)
 			}
-			if scenario == "startup" || scenario == "repair" {
+			if scenario == "startup" {
 				if err != nil {
 					t.Fatal(err)
 				}
 				record.State = JobRecovering
-				cause := metrics.RecoveryStartup
-				if scenario == "repair" {
-					cause = metrics.RecoveryRepair
-				}
-				if observer.count("transition", string(cause)) != 1 {
+				if observer.count("transition", string(metrics.RecoveryStartup)) != 1 {
 					t.Fatalf("wrong transition cause: %+v", observer.snapshot())
 				}
-			} else if scenario != "compare skip" && !errors.Is(err, wantErr) {
+			} else if !errors.Is(err, wantErr) {
 				t.Fatalf("error=%v, want %v", err, wantErr)
 			}
 			assertRecoveryRecord(t, inner, record)
@@ -141,6 +105,7 @@ func TestMetricsRecoverySourcesRetriesAndNoWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	want.State, want.AttemptID = JobSucceeded, 10
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, inner, want)
 	if observer.count("submitted", "") != 0 || observer.count("started", "") != 3 ||
 		observer.count("finished", "") != 3 || observer.count("terminal", "") != 1 ||
@@ -163,13 +128,10 @@ func TestMetricsRepairFailureIsRecordedDuringShutdown(t *testing.T) {
 	inner := NewMemoryJobStore()
 	saveRecoveryRecord(t, inner, record)
 	observer := &recordingMetrics{}
-	store := &recoveryPassStore{JobStore: inner, save: func(got JobRecord) error {
-		if got.State == JobRecovering {
-			return errors.New("injected repair Save failure")
-		}
-		return inner.Save(got)
+	store := &recoveryPassStore{JobStore: inner, recoverRunning: func(JobRecord) (bool, error) {
+		return false, errors.New("injected conditional repair failure")
 	}}
-	s := &CoordinatorServer{jobStore: store, metrics: observer, recoveryReady: make(chan struct{}, 1)}
+	s := &CoordinatorServer{jobStore: store, metrics: observer, lifecycle: newCoordinatorLifecycle(), recoveryReady: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dispatchDone := make(chan struct{}, 1)
@@ -202,7 +164,7 @@ func TestMetricsRepairFailureIsRecordedDuringShutdown(t *testing.T) {
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobRunning, 2, "worker"
 	assertRecoveryRecord(t, inner, want)
-	assertRecoveryOwnershipReleased(t, s, record.JobID)
+	assertQueuedSessionReleased(t, s, record.JobID, true)
 }
 
 func TestMetricsSubmissionRejectedBeforeExecution(t *testing.T) {
@@ -212,7 +174,7 @@ func TestMetricsSubmissionRejectedBeforeExecution(t *testing.T) {
 		t.Fatal("cannot preclaim")
 	}
 	defer s.releaseJob(904)
-	if _, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{JobId: 904, TimeoutMs: 1000}); status.Code(err) != codes.AlreadyExists {
+	if _, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{JobId: 904, TimeoutMs: 1000}); status.Code(err) != codes.Aborted {
 		t.Fatalf("ownership error=%v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

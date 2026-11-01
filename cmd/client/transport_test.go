@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,7 +34,21 @@ func (s *clientTLSCoordinator) SubmitJob(ctx context.Context, r *runtimepb.Submi
 	if s.requests != nil {
 		s.requests <- r
 	}
-	return &runtimepb.SubmitJobResponse{JobId: r.JobId, AttemptId: 1, Status: "Succeeded"}, nil
+	return &runtimepb.SubmitJobResponse{JobId: r.JobId, Status: "Accepted"}, nil
+}
+
+func (s *clientTLSCoordinator) GetJob(ctx context.Context, r *runtimepb.GetJobRequest) (*runtimepb.GetJobResponse, error) {
+	p, err := rpcauth.AuthenticatePeer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.calls.Add(1)
+	s.identity <- p
+	state := runtimepb.JobState_JOB_STATE_RECOVERING
+	if r.JobId == 3001 {
+		state = runtimepb.JobState_JOB_STATE_SUCCEEDED
+	}
+	return &runtimepb.GetJobResponse{JobId: r.JobId, State: state, AttemptId: 7, WorkerId: "worker-a", HasWorkerResult: r.JobId == 3001}, nil
 }
 
 func TestClientMTLSProductionDial(t *testing.T) {
@@ -72,7 +88,7 @@ func TestClientMTLSProductionDial(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)), grpc.UnaryInterceptor(policy.UnaryInterceptor()))
-			service := &clientTLSCoordinator{identity: make(chan rpcauth.Principal, 1), requests: make(chan *runtimepb.SubmitJobRequest, 1)}
+			service := &clientTLSCoordinator{identity: make(chan rpcauth.Principal, 16), requests: make(chan *runtimepb.SubmitJobRequest, 1)}
 			runtimepb.RegisterCoordinatorServiceServer(server, service)
 			done := make(chan struct{})
 			go func() { defer close(done); _ = server.Serve(listener) }()
@@ -100,7 +116,7 @@ func TestClientMTLSProductionDial(t *testing.T) {
 			}
 			response, err := runtimepb.NewCoordinatorServiceClient(conn).SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 100, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 5000})
 			if tc.success {
-				if err != nil || response.GetStatus() != "Succeeded" || response.GetJobId() != 100 || service.calls.Load() != 1 {
+				if err != nil || response.GetStatus() != "Accepted" || response.GetJobId() != 100 || service.calls.Load() != 1 {
 					t.Fatalf("client production TLS dial: %v", err)
 				}
 				select {
@@ -112,7 +128,7 @@ func TestClientMTLSProductionDial(t *testing.T) {
 					t.Fatal("no authenticated request")
 				}
 				<-service.requests // Original request, whose assertions remain above.
-				response, err = submitDemo(ctx, runtimepb.NewCoordinatorServiceClient(conn), clientExecutionConfig{JobTimeout: 40 * time.Second, RPCTimeout: 90 * time.Second})
+				response, err = submitDemo(ctx, runtimepb.NewCoordinatorServiceClient(conn), clientExecutionConfig{JobTimeout: 40 * time.Second, RPCTimeout: 90 * time.Second, ObserveTimeout: 30 * time.Second, PollInterval: time.Nanosecond})
 				if err != nil || response.GetJobId() != 3001 || service.calls.Load() != 2 {
 					t.Fatalf("configured demo over mTLS: %v", err)
 				}
@@ -123,6 +139,18 @@ func TestClientMTLSProductionDial(t *testing.T) {
 					}
 				case <-ctx.Done():
 					t.Fatal("configured demo request was not received")
+				}
+				<-service.identity // The configured SubmitJob's authenticated peer.
+				snapshot, err := getJob(ctx, runtimepb.NewCoordinatorServiceClient(conn), 100)
+				if err != nil || snapshot.JobId != 100 || snapshot.State != runtimepb.JobState_JOB_STATE_RECOVERING || snapshot.AttemptId != 7 || snapshot.WorkerId != "worker-a" || snapshot.HasWorkerResult || service.calls.Load() != 3 {
+					t.Fatalf("single observation over production mTLS=%v, %v", snapshot, err)
+				}
+				if got := <-service.identity; got != clientIdentity {
+					t.Fatal("GetJob authenticated the wrong peer")
+				}
+				var output bytes.Buffer
+				if err := runClient(ctx, runtimepb.NewCoordinatorServiceClient(conn), clientExecutionConfig{JobTimeout: time.Second, RPCTimeout: time.Second, ObserveTimeout: time.Second, PollInterval: time.Nanosecond}, &output); err != nil || !strings.Contains(output.String(), "status=Succeeded attempt=7") || !strings.Contains(output.String(), "has_worker_result=true") || service.calls.Load() != 5 {
+					t.Fatalf("async workflow over authenticated connection: %q, %v", output.String(), err)
 				}
 			} else if err == nil || response != nil || service.calls.Load() != 0 {
 				t.Fatal("wrong Coordinator URI or DNS/IP SAN accepted")

@@ -15,13 +15,13 @@ import (
 
 func TestSubmitJobPersistsTerminalStateAcrossSQLiteReopen(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status string
-		state  JobState
+		name, status, output, resultError string
+		state                             JobState
 	}{
-		{name: "succeeded", status: "Succeeded", state: JobSucceeded},
-		{name: "failed", status: "Failed", state: JobFailed},
-		{name: "cancelled", status: "Cancelled", state: JobCancelled},
+		{name: "succeeded", status: "Succeeded", state: JobSucceeded, output: "output", resultError: "task error"},
+		{name: "failed", status: "Failed", state: JobFailed, output: "output", resultError: "task error"},
+		{name: "cancelled", status: "Cancelled", state: JobCancelled, output: "output", resultError: "task error"},
+		{name: "empty success", status: "succeeded", state: JobSucceeded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const jobID int64 = 601
@@ -60,13 +60,13 @@ func TestSubmitJobPersistsTerminalStateAcrossSQLiteReopen(t *testing.T) {
 					}
 					return &runtimepb.ExecuteJobResponse{
 						JobId: req.JobId, AttemptId: req.AttemptId,
-						Status: tc.status, Output: "output", Error: "task error",
+						Status: tc.status, Output: tc.output, Error: tc.resultError,
 					}, nil
 				})
 
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				accepted, err = coordinatorA.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+				accepted, err = coordinatorA.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{
 					JobId: jobID, TaskType: taskType, Payload: payload, TimeoutMs: timeoutMs,
 				})
 				if err != nil || accepted == nil || accepted.JobId != jobID ||
@@ -88,6 +88,7 @@ func TestSubmitJobPersistsTerminalStateAcrossSQLiteReopen(t *testing.T) {
 				want := JobRecord{
 					JobID: jobID, State: tc.state, AttemptID: accepted.AttemptId, WorkerID: workerID,
 					TaskType: taskType, Payload: payload, TimeoutMs: timeoutMs,
+					HasWorkerResult: true, Output: tc.output, Error: tc.resultError,
 				}
 				if record != want {
 					t.Fatalf("record before close=%+v, want %+v", record, want)
@@ -110,6 +111,7 @@ func TestSubmitJobPersistsTerminalStateAcrossSQLiteReopen(t *testing.T) {
 			want := JobRecord{
 				JobID: jobID, State: tc.state, AttemptID: accepted.AttemptId, WorkerID: workerID,
 				TaskType: taskType, Payload: payload, TimeoutMs: timeoutMs,
+				HasWorkerResult: true, Output: tc.output, Error: tc.resultError,
 			}
 			if record != want {
 				t.Fatalf("record after reopen=%+v, want %+v", record, want)
@@ -156,6 +158,7 @@ func TestLateAttemptCannotOverwriteSQLiteTerminalState(t *testing.T) {
 		close(firstStarted)
 		<-allowFirstReturn // Simulate remote work that ignores attempt cancellation.
 		resp := successfulResult(req)
+		resp.Output = "late output must not replace the accepted output"
 		lateReturned <- resp
 		return resp, nil
 	})
@@ -170,7 +173,7 @@ func TestLateAttemptCannotOverwriteSQLiteTerminalState(t *testing.T) {
 	}
 	submitted := make(chan submissionResult, 1)
 	go func() {
-		resp, err := coordinator.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
+		resp, err := coordinator.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
 		submitted <- submissionResult{resp: resp, err: err}
 	}()
 	select {
@@ -189,7 +192,7 @@ func TestLateAttemptCannotOverwriteSQLiteTerminalState(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("retry did not complete")
 	}
-	want := JobRecord{JobID: jobID, State: JobSucceeded, AttemptID: 2, WorkerID: "second", TimeoutMs: 1000}
+	want := JobRecord{JobID: jobID, State: JobSucceeded, AttemptID: 2, WorkerID: "second", TimeoutMs: 1000, HasWorkerResult: true, Output: "done"}
 	record, ok, err := store.Load(jobID)
 	if err != nil || !ok || record != want {
 		t.Fatalf("accepted record=%+v found=%v error=%v, want %+v", record, ok, err, want)
@@ -287,7 +290,7 @@ func TestSubmitJobDoesNotReportSuccessWhenSQLiteTerminalSaveFails(t *testing.T) 
 	}
 	submitted := make(chan submissionResult, 1)
 	go func() {
-		resp, err := coordinator.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
+		resp, err := coordinator.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
 		submitted <- submissionResult{resp: resp, err: err}
 	}()
 	select {
@@ -355,7 +358,7 @@ func TestMismatchedWorkerResultDoesNotPersistSQLiteTerminalState(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := coordinator.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
+	resp, err := coordinator.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TimeoutMs: 1000})
 	if resp != nil || status.Code(err) != codes.Unavailable {
 		t.Fatalf("mismatched results response=%+v error=%v", resp, err)
 	}

@@ -125,20 +125,68 @@ func TestCapacitySharedRealProver(t *testing.T) {
 }
 func TestCapacityTwoWorkerFixture(t *testing.T) {
 	f := newConfiguredSubmitBenchmarkFixture(t, submitBenchmarkConfig{workers: 2, capacity: 1, keyDir: newCapacityKeyDir(t), track: true})
+	// The shared fixture owns the scheduler; warmups settle before measurement.
 	if len(f.workers) != 2 || f.workers[0].limiter == f.workers[1].limiter || f.workers[0].registry == f.workers[1].registry || f.workers[0].prover == f.workers[1].prover || f.workers[0].witnesses == f.workers[1].witnesses {
 		t.Fatal("Worker resources are not independent")
 	}
 	for id := int64(1); id <= 2; id++ {
 		sample := runCapacityRequest(f, "test", "D", "warmup", 0, int(id), id, time.Now())
-		if sample.RPCCode != "OK" || sample.ResponseState != "Succeeded" {
-			t.Fatalf("real mTLS dispatch failed: %+v", sample)
+		ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+		err := f.waitIdle(ctx)
+		cancel()
+		if err != nil || sample.RPCCode != "OK" || sample.ResponseState != "Accepted" || sample.AdmissionAttemptID != 0 || sample.AttemptID != 1 || sample.TerminalState != "Succeeded" || !sample.HasWorkerResult || !sample.TerminalHasOutput {
+			t.Fatalf("observed real dispatch failed: %+v, %v", sample, err)
+		}
+		if err := f.auditSample(&sample.submitBenchmarkSample); err != nil {
+			t.Fatal(err)
 		}
 	}
+
 	if f.workers[0].calls.Load() != 1 || f.workers[1].calls.Load() != 1 {
 		t.Fatal("both registered workers were not selected")
 	}
+	before := gatherIntegrationMetrics(t, f.coordinatorRegistry)
+	measured := runCapacityRequest(f, "test", "D", "measured", 0, 1, capacityWarmup+1, time.Now())
+	ctx, stop := context.WithTimeout(f.ctx, 10*time.Second)
+	defer stop()
+	if err := f.waitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.auditSample(&measured.submitBenchmarkSample); err != nil {
+		t.Fatal(err)
+	}
+	originalOutput := measured.snapshot.Output
+	measured.snapshot.Output = "mismatched output"
+	if err := f.auditSample(&measured.submitBenchmarkSample); err == nil || measured.AuditOK {
+		t.Fatal("different observed and persisted output accepted")
+	}
+	measured.snapshot.Output = originalOutput
+	measured.snapshot.HasWorkerResult = false
+	if err := f.auditSample(&measured.submitBenchmarkSample); err == nil || measured.AuditOK {
+		t.Fatal("missing observed result presence accepted")
+	}
+	measured.snapshot.HasWorkerResult = true
+	if err := f.auditSample(&measured.submitBenchmarkSample); err != nil {
+		t.Fatal(err)
+	}
+	after := gatherIntegrationMetrics(t, f.coordinatorRegistry)
+	labels := map[string]string{"source": "submit"}
+	if after.sample("dzkr_jobs_submitted_total", labels).value-before.sample("dzkr_jobs_submitted_total", labels).value != 1 || after.sample("dzkr_job_execution_duration_seconds", labels).count-before.sample("dzkr_job_execution_duration_seconds", labels).count != 1 {
+		t.Fatal("warmup activity included in measured counters or final metrics read before settlement")
+	}
+	closedAfterSettlement := false
+	f.beforeClose = func() error {
+		if err := f.waitIdle(ctx); err != nil {
+			return err
+		}
+		closedAfterSettlement = true
+		return nil
+	}
 	if err := f.finish(); err != nil {
 		t.Fatal(err)
+	}
+	if !closedAfterSettlement {
+		t.Fatal("missing joined-store-close observation")
 	}
 	for _, w := range f.workers {
 		if w.proofs.snapshot().Active != 0 {
@@ -157,6 +205,8 @@ func TestCapacityBusyAccounting(t *testing.T) {
 	}
 	before := gatherIntegrationMetrics(t, registry)
 	observer.JobSubmitted(metrics.SourceSubmit)
+	observer.ObserveJobAdmission(metrics.AdmissionAccepted, time.Millisecond)
+	observer.ObserveJobExecution(metrics.SourceSubmit, time.Millisecond)
 	for range 2 {
 		observer.AttemptStarted(metrics.SourceSubmit)
 		observer.AttemptFinished(metrics.SourceSubmit, metrics.AttemptRPCError, time.Millisecond)
@@ -170,10 +220,12 @@ func TestCapacityBusyAccounting(t *testing.T) {
 	}{
 		{"busy_exhaustion", "", true, true}, {"transport_error_is_distinct", "transport", true, false},
 		{"missing_durable_record", "missing", false, true}, {"dropped_event", "dropped", false, true},
+		{"accepted_only", "accepted", false, false}, {"censored", "censored", false, false},
+		{"duplicate_sample", "duplicate", false, true}, {"inconsistent_id", "identity", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := capacityReport{Iterations: 1, Issued: 1, Attempts: 2, Calls: 2, Busy: 2, RPCStatus: make(map[string]int), Durable: make(map[string]int),
-				Samples: []capacitySample{{submitBenchmarkSample: submitBenchmarkSample{JobID: 7, RPCCode: "Unavailable", DurableState: "Failed", DurableAttempt: 2}, Issued: true, SpecMatches: true}},
+			r := capacityReport{RunID: submitBenchmarkRunID, Invocation: "test", Config: "B", Iterations: 1, Issued: 1, Attempts: 2, Calls: 2, Busy: 2, RPCStatus: make(map[string]int), Durable: make(map[string]int),
+				Samples: []capacitySample{busyCapacitySample()},
 				Workers: []capacityWorkerReport{{WorkerID: "worker-a", Capacity: 1, Calls: 2, Busy: 2, Events: []capacityEvent{{Kind: "rpc", JobID: 7, AttemptID: 1, Code: "ResourceExhausted"}, {Kind: "rpc", JobID: 7, AttemptID: 2, Code: "ResourceExhausted"}}}}}
 			switch tc.change {
 			case "transport":
@@ -184,6 +236,14 @@ func TestCapacityBusyAccounting(t *testing.T) {
 				r.Samples[0].DurableState = "Missing"
 			case "dropped":
 				r.Workers[0].Dropped = 1
+			case "accepted":
+				r.Samples[0].TerminalNS, r.Samples[0].TerminalState = 0, ""
+			case "censored":
+				r.Samples[0].Censored, r.Samples[0].ObservationError = true, "DeadlineExceeded"
+			case "duplicate":
+				r.Samples = append(r.Samples, r.Samples[0])
+			case "identity":
+				r.Samples[0].JobID++
 			}
 			finalizeCapacityAccounting(&r, before, after)
 			if r.AccountingOK != tc.wantOK || r.ExpectedOutcomes != tc.wantExpected {

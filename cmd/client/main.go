@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
@@ -58,26 +60,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer conn.Close()
-
 	client := runtimepb.NewCoordinatorServiceClient(conn)
 
-	resp, err := submitDemo(context.Background(), client, *execution)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err = runClient(ctx, client, *execution, os.Stdout)
+	stop()
+	_ = conn.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	proofLength := 0
-	if resp.Status == "Succeeded" {
-		proofLength = proofByteLength(resp.Output)
-	}
-
-	fmt.Printf(
-		"job=%d status=%s attempt=%d proof_bytes=%d error=%s\n",
-		resp.JobId,
-		resp.Status,
-		resp.AttemptId,
-		proofLength,
-		resp.Error,
-	)
 }

@@ -94,7 +94,7 @@ func TestResultAcceptanceBoundaries(t *testing.T) {
 			})
 			go func() {
 				defer close(finished)
-				result.resp, result.err = s.SubmitJob(parent, &runtimepb.SubmitJobRequest{
+				result.resp, result.err = s.executeSubmissionForTest(parent, &runtimepb.SubmitJobRequest{
 					JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
 				})
 			}()
@@ -169,7 +169,7 @@ func TestResultAcceptanceBoundaries(t *testing.T) {
 				if result.resp != nil && result.resp.AttemptId == 1 && result.resp.Status == "Succeeded" {
 					t.Error("returned success for expired Attempt 1")
 				}
-				want := preimageRecord(jobID, 2, workerID, JobSucceeded, payload)
+				want := withWorkerResult(preimageRecord(jobID, 2, workerID, JobSucceeded, payload), output, "")
 				if result.err != nil || result.resp == nil || result.resp.AttemptId != 2 ||
 					result.resp.Status != "Succeeded" || record != want || workerCalls.Load() != 2 || verifier.calls.Load() != 2 {
 					t.Errorf("lease-expiry retry: record=%+v response=%v error=%v calls=%d Verify=%d",
@@ -215,7 +215,7 @@ func TestResultAcceptanceBoundaries(t *testing.T) {
 					result.resp.AttemptId != 1 || result.resp.Status != "Succeeded" || result.resp.Output != output {
 					t.Fatalf("valid proof not accepted: response=%v error=%v", result.resp, result.err)
 				}
-				want := preimageRecord(jobID, 1, workerID, JobSucceeded, payload)
+				want := withWorkerResult(preimageRecord(jobID, 1, workerID, JobSucceeded, payload), output, "")
 				if record != want || workerCalls.Load() != 1 || verifier.calls.Load() != 1 {
 					t.Errorf("valid acceptance record=%+v, want %+v with one dispatch and verification", record, want)
 				}
@@ -285,7 +285,7 @@ func TestPersistTerminalResultRejectsInvalidNonZKResult(t *testing.T) {
 					t.Fatalf("load current record: found=%v error=%v", ok, err)
 				}
 				record := JobRecord{JobID: jobID, State: terminal.state, AttemptID: attempt, WorkerID: "worker",
-					TaskType: "hash", Payload: "hello", TimeoutMs: 1000}
+					TaskType: "hash", Payload: "hello", TimeoutMs: 1000, HasWorkerResult: true, Output: "rejected output", Error: "rejected error"}
 				beforeSaves := saves
 				eligible, err := s.persistTerminalResult(ctx, record)
 				if eligible || (invalidation == "cancelled and expired" && !errors.Is(err, context.Canceled)) ||

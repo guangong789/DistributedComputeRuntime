@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"strings"
@@ -30,7 +31,7 @@ func (b *payloadPrivacyLog) Write(p []byte) (int, error) {
 }
 func (b *payloadPrivacyLog) text() string { b.mu.Lock(); defer b.mu.Unlock(); return b.Buffer.String() }
 
-func TestZKPayloadLegacyRecoveryCanonicalizesWithoutResettingBackoff(t *testing.T) {
+func TestZKPayloadLegacyRecoveryPreservesSpecWithoutResettingBackoff(t *testing.T) {
 	fixture := newIntegrationZKFixture(t)
 	store := newWorkerFailureStore(t)
 	digest := zk.ComputePreimageDigest(42)
@@ -63,12 +64,19 @@ func TestZKPayloadLegacyRecoveryCanonicalizesWithoutResettingBackoff(t *testing.
 	if e.failures != 1 || e.generation != 9 || !e.nextRetry.Equal(clock.now().Add(time.Second)) {
 		t.Fatal("normalization broke first failed session schedule")
 	}
-	want := preimageRecord(record.JobID, 9, "worker", JobRecovering, fixture.payload)
+	want := preimageRecord(record.JobID, 9, "worker", JobRecovering, raw)
 	assertRecoveryRecord(t, store, want)
-	// Same public task, different byte representation: no replacement/cooldown reset.
+	// Scheduler equivalence remains semantic, but ordinary Save cannot replace
+	// the stored byte representation, even with equivalent canonical JSON.
 	representation := want
-	representation.Payload = raw
-	saveRecoveryRecord(t, store, representation)
+	representation.Payload = fixture.payload
+	if recoverySpecHash(representation) != recoverySpecHash(want) {
+		t.Fatal("equivalent payloads changed scheduler identity")
+	}
+	if err := store.Save(representation); !errors.Is(err, ErrJobSpecConflict) {
+		t.Fatalf("legacy payload replacement: %v", err)
+	}
+	assertRecoveryRecord(t, store, want)
 	if err := s.runScheduledRecoveryPass(context.Background(), q); err != nil {
 		t.Fatal(err)
 	}
@@ -89,14 +97,15 @@ func TestZKPayloadLegacyRecoveryCanonicalizesWithoutResettingBackoff(t *testing.
 		t.Fatal(err)
 	}
 	want.State, want.AttemptID = JobSucceeded, 12
+	want = withWorkerResult(want, storedProofOutput(t, store, record.JobID, fixture), "")
 	assertRecoveryRecord(t, store, want)
 	if calls.Load() != 5 || len(q.entries) != 0 || observer.count("submitted", "") != 0 || observer.count("started", "") != 5 || observer.count("finished", "") != 5 || observer.count("verification", "") != 1 || observer.count("terminal", "") != 1 {
 		t.Fatal("legacy recovery changed attempts, verification or metrics")
 	}
 	for _, saved := range store.savedRecords() {
 		if saved.State == JobRunning || saved.State == JobSucceeded {
-			if saved.Payload != fixture.payload {
-				t.Fatal("running/terminal persistence used raw legacy JSON")
+			if saved.Payload != raw {
+				t.Fatal("running/terminal persistence rewrote legacy JSON")
 			}
 		}
 	}
@@ -182,7 +191,7 @@ func TestZKPayloadStartupRecoveryHandlesLegacyRows(t *testing.T) {
 					t.Fatal("stranded unsafe Running row was scheduled")
 				}
 			} else {
-				record.State, record.Payload = JobRecovering, preimagePublicPayload(digest)
+				record.State = JobRecovering
 				assertRecoveryRecord(t, store, record)
 				if len(store.savedRecords()) != 2 || observer.count("transition", string(metrics.RecoveryStartup)) != 1 {
 					t.Fatal("valid legacy startup marking failed")
@@ -191,6 +200,61 @@ func TestZKPayloadStartupRecoveryHandlesLegacyRows(t *testing.T) {
 			if len(s.jobAttempts) != 0 || len(s.leases) != 0 || len(s.activeJobs) != 0 {
 				t.Fatal("startup marking allocated execution state")
 			}
+		})
+	}
+}
+
+func TestZKPayloadLegacyRecoveryRetainsStoredSpecAcrossRetries(t *testing.T) {
+	for _, backend := range []string{"memory", "sqlite"} {
+		t.Run(backend, func(t *testing.T) {
+			store := &workerFailureStore{JobStore: newCreationTestStore(t, backend)}
+			const raw = ` { "digest":"+001", "witness_ref":"ref" } `
+			const canonical = `{"witness_ref":"ref","digest":"1"}`
+			original := preimageRecord(9913, 7, "old", JobRunning, raw)
+			saveRecoveryRecord(t, store, original)
+			verifier := &countingPreimageVerifier{}
+			s := &CoordinatorServer{jobStore: store, preimageVerifier: verifier}
+			if err := s.recoverRunningJobs(); err != nil {
+				t.Fatal(err)
+			}
+			recovering := original
+			recovering.State = JobRecovering
+			assertRecoveryRecord(t, store, recovering)
+			var calls atomic.Int32
+			registerTestWorker(t, s, "worker", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+				n := calls.Add(1)
+				if req.Payload != canonical || req.AttemptId != 7+int64(n) || req.TimeoutMs != original.TimeoutMs {
+					t.Errorf("execution-facing spec/generation: %+v", req)
+				}
+				running := original
+				running.AttemptID, running.WorkerID = req.AttemptId, "worker"
+				persisted, found, loadErr := store.Load(original.JobID)
+				if loadErr != nil || !found || persisted != running {
+					t.Errorf("published record=%+v found=%v error=%v, want %+v", persisted, found, loadErr, running)
+				}
+				if n == 1 {
+					return nil, status.Error(codes.Unavailable, "injected retryable failure")
+				}
+				return &runtimepb.ExecuteJobResponse{JobId: req.JobId, AttemptId: req.AttemptId,
+					Status: "Succeeded", Output: "cHJvb2Y="}, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.retryRecoveringJob(ctx, recovering); err != nil {
+				t.Fatal(err)
+			}
+			running8 := original
+			running8.AttemptID, running8.WorkerID = 8, "worker"
+			running9 := running8
+			running9.AttemptID = 9
+			terminal := withWorkerResult(running9, "cHJvb2Y=", "")
+			terminal.State = JobSucceeded
+			assertWorkerFailureSaves(t, store, []JobRecord{original, recovering, running8, running9, terminal})
+			assertRecoveryRecord(t, store, terminal)
+			if calls.Load() != 2 || verifier.calls.Load() != 1 {
+				t.Fatalf("retry/verification changed: calls=%d verifications=%d", calls.Load(), verifier.calls.Load())
+			}
+			assertRecoveryOwnershipReleased(t, s, original.JobID)
 		})
 	}
 }

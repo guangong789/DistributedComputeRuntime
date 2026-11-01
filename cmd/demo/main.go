@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
@@ -251,18 +252,36 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 	fmt.Fprintln(out, "  [3/6] [OK] Worker registered using mTLS")
 	req := &runtimepb.SubmitJobRequest{JobId: 1, TaskType: "hash", Payload: "DistributedZKRuntime local demo", TimeoutMs: 5000}
 	fmt.Fprintf(out, "\nTask Execution\n  Submitting task: %s\n", req.TaskType)
-	var resp *runtimepb.SubmitJobResponse
+	client := runtimepb.NewCoordinatorServiceClient(conn)
+	var ack *runtimepb.SubmitJobResponse
 	if err := stage(ctx, 5*time.Second, func(ctx context.Context) error {
 		var err error
-		resp, err = runtimepb.NewCoordinatorServiceClient(conn).SubmitJob(ctx, req)
+		ack, err = client.SubmitJob(ctx, req)
 		return err
 	}); err != nil {
 		return fmt.Errorf("SubmitJob: %w", err)
 	}
+	if err := jobobservation.ValidateAdmission(ack, req.JobId); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "  JobID: %d | Admission: Accepted | Awaiting background execution via GetJob\n", ack.JobId)
+	var resp *runtimepb.GetJobResponse
+	if err := stage(ctx, 30*time.Second, func(ctx context.Context) error {
+		var err error
+		resp, err = jobobservation.Wait(ctx, req.JobId, jobobservation.DefaultPollInterval, func(ctx context.Context, id int64) (*runtimepb.GetJobResponse, error) {
+			return client.GetJob(ctx, &runtimepb.GetJobRequest{JobId: id})
+		})
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := jobobservation.TerminalError(resp); err != nil {
+		return err
+	}
 	if err := validateResponse(req, resp); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "  [4/6] [OK] Hash task completed\n  JobID: %d | AttemptID: %d | Final Status: %s\n\nVerification\n  [OK] SHA-256 independently verified by demo\n  SHA-256: %s\n", resp.JobId, resp.AttemptId, resp.Status, resp.Output)
+	fmt.Fprintf(out, "  [4/6] [OK] Background hash task completed (GetJob)\n  JobID: %d | AttemptID: %d | Final State: %s | HasWorkerResult: %t\n\nVerification\n  [OK] SHA-256 independently verified by demo\n  SHA-256: %s\n", resp.JobId, resp.AttemptId, jobobservation.StateName(resp.State), resp.HasWorkerResult, resp.Output)
 	// Stop before opening a read-only SQLite connection; no concurrent writers.
 	var shutdownErr error
 	for i := len(children) - 1; i >= 0; i-- {

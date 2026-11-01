@@ -83,6 +83,9 @@ func (m *recordingMetrics) snapshot() []recordedMetric {
 func (m *recordingMetrics) JobSubmitted(s metrics.ExecutionSource) {
 	m.record(recordedMetric{name: "submitted", source: s})
 }
+func (m *recordingMetrics) ObserveJobAdmission(o metrics.AdmissionOutcome, d time.Duration) {
+	m.record(recordedMetric{name: "admission", label: string(o), duration: d})
+}
 func (m *recordingMetrics) JobTerminal(s metrics.ExecutionSource, state metrics.TerminalState) {
 	m.record(recordedMetric{name: "terminal", source: s, label: string(state)})
 }
@@ -146,6 +149,15 @@ func TestMetricsPersistenceOrdering(t *testing.T) {
 				}
 				observer.record(recordedMetric{name: name})
 				return nil
+			}, create: func(record JobRecord) (bool, error) {
+				if scenario == "running save failure" {
+					return false, errors.New("injected first Create failure")
+				}
+				created, err := inner.Create(record)
+				if created && err == nil {
+					observer.record(recordedMetric{name: "running_saved"})
+				}
+				return created, err
 			}}
 			if scenario == "nil store" {
 				s.jobStore = nil
@@ -180,7 +192,7 @@ func TestMetricsPersistenceOrdering(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 901, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+			resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 901, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
 			want := []string{"submitted", "running_saved", "started", "terminal_saved", "terminal", "finished", "execution"}
 			switch scenario {
 			case "running save failure":
@@ -195,9 +207,9 @@ func TestMetricsPersistenceOrdering(t *testing.T) {
 					t.Fatalf("terminal save failure: response=%v error=%v", resp, err)
 				}
 			case "nil store":
-				want = []string{"submitted", "execution"}
-				if err != nil || resp == nil || resp.Status != "Succeeded" {
-					t.Fatalf("nil-store behavior changed: response=%v error=%v", resp, err)
+				want = nil
+				if status.Code(err) != codes.FailedPrecondition || resp != nil || calls.Load() != 0 {
+					t.Fatalf("missing store did not fail closed: response=%v error=%v", resp, err)
 				}
 			default:
 				if err != nil || resp == nil || resp.Status != scenario {
@@ -359,7 +371,7 @@ func TestMetricsConcurrentSubmissions(t *testing.T) {
 		wg.Add(1)
 		go func(id int64) {
 			defer wg.Done()
-			resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: id, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+			resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: id, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
 			if err != nil || resp == nil || resp.Status != "Succeeded" {
 				t.Errorf("concurrent submission: response=%v error=%v", resp, err)
 			}
@@ -412,7 +424,7 @@ func TestMetricsAttemptFinishedOnceOnAbandonment(t *testing.T) {
 					return nil, status.Error(codes.Unavailable, "injected RPC error")
 				}
 			})
-			resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+			resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{
 				JobId: 909, TaskType: "hash", Payload: "hello", TimeoutMs: 1000,
 			})
 			gotCode := status.Code(err)

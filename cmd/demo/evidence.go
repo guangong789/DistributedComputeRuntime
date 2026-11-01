@@ -18,8 +18,8 @@ func expectedHash(payload string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func validateResponse(req *runtimepb.SubmitJobRequest, resp *runtimepb.SubmitJobResponse) error {
-	if resp == nil || resp.JobId != req.JobId || resp.AttemptId != 1 || resp.Status != "Succeeded" || resp.Error != "" || resp.Output != expectedHash(req.Payload) {
+func validateResponse(req *runtimepb.SubmitJobRequest, resp *runtimepb.GetJobResponse) error {
+	if resp == nil || resp.JobId != req.JobId || resp.AttemptId != 1 || resp.State != runtimepb.JobState_JOB_STATE_SUCCEEDED || !resp.HasWorkerResult || resp.WorkerId != "worker-1" || resp.Error != "" || resp.Output != expectedHash(req.Payload) {
 		return errors.New("hash response has invalid identity, attempt, status, output or task error")
 	}
 	return nil
@@ -29,12 +29,14 @@ type persistedJob struct {
 	JobID, State, AttemptID     int64
 	WorkerID, TaskType, Payload string
 	TimeoutMs                   int64
+	HasWorkerResult             bool
+	Output, Error               string
 }
 
 func validateRecord(req *runtimepb.SubmitJobRequest, record persistedJob) error {
 	// JobSucceeded's stable SQLite numeric value is 2 (cmd/coordinator/jobs.go).
 	// package main is not importable; no runtime state or schema is redefined here.
-	want := persistedJob{req.JobId, 2, 1, "worker-1", req.TaskType, req.Payload, req.TimeoutMs}
+	want := persistedJob{req.JobId, 2, 1, "worker-1", req.TaskType, req.Payload, req.TimeoutMs, true, expectedHash(req.Payload), ""}
 	if record != want {
 		return errors.New("SQLite record does not match the accepted hash job")
 	}
@@ -49,8 +51,8 @@ func verifySQLite(ctx context.Context, path string, req *runtimepb.SubmitJobRequ
 	}
 	defer db.Close()
 	var r persistedJob
-	err = db.QueryRowContext(ctx, `SELECT job_id, state, attempt_id, worker_id, task_type, payload, timeout_ms FROM jobs WHERE job_id = ?`, req.JobId).
-		Scan(&r.JobID, &r.State, &r.AttemptID, &r.WorkerID, &r.TaskType, &r.Payload, &r.TimeoutMs)
+	err = db.QueryRowContext(ctx, `SELECT job_id, state, attempt_id, worker_id, task_type, payload, timeout_ms, has_worker_result, output, error FROM jobs WHERE job_id = ?`, req.JobId).
+		Scan(&r.JobID, &r.State, &r.AttemptID, &r.WorkerID, &r.TaskType, &r.Payload, &r.TimeoutMs, &r.HasWorkerResult, &r.Output, &r.Error)
 	if err != nil {
 		return fmt.Errorf("read persisted job: %w", err)
 	}

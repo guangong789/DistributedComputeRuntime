@@ -39,7 +39,10 @@ func (s *SQLiteJobStore) initSchema() error {
 			worker_id TEXT NOT NULL,
 			task_type TEXT NOT NULL DEFAULT '',
 			payload TEXT NOT NULL DEFAULT '',
-			timeout_ms INTEGER NOT NULL DEFAULT 0
+			timeout_ms INTEGER NOT NULL DEFAULT 0,
+			has_worker_result INTEGER NOT NULL DEFAULT 0,
+			output TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT ''
 		);
 	`)
 	if err != nil {
@@ -67,11 +70,110 @@ func (s *SQLiteJobStore) initSchema() error {
 		return err
 	}
 
+	for _, column := range []struct{ name, definition string }{
+		{"has_worker_result", "INTEGER NOT NULL DEFAULT 0"},
+		{"output", "TEXT NOT NULL DEFAULT ''"},
+		{"error", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureJobColumn(column.name, column.definition); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+// Create uses the primary key as the arbitration point, including across store
+// instances. Storage and RowsAffected errors leave the commit outcome uncertain.
+func (s *SQLiteJobStore) Create(record JobRecord) (bool, error) {
+	result, err := s.db.Exec(`
+		INSERT INTO jobs (
+			job_id, state, attempt_id, worker_id, task_type, payload, timeout_ms,
+			has_worker_result, output, error
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(job_id) DO NOTHING
+	`, record.JobID, record.State, record.AttemptID, record.WorkerID,
+		record.TaskType, record.Payload, record.TimeoutMs,
+		record.HasWorkerResult, record.Output, record.Error)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// TryStartQueued uses one conditional UPDATE as the first-attempt arbitration
+// point, including across store instances. It never inserts or rewrites the spec.
+func (s *SQLiteJobStore) TryStartQueued(expected JobRecord, workerID string) (bool, error) {
+	if err := validateQueuedPublication(expected, workerID); err != nil {
+		return false, err
+	}
+	result, err := s.db.Exec(`
+		UPDATE jobs SET state = ?, attempt_id = 1, worker_id = ?
+		WHERE job_id = ?
+			AND task_type = ? COLLATE BINARY
+			AND payload = ? COLLATE BINARY
+			AND timeout_ms = ?
+			AND state = ? AND attempt_id = 0
+			AND worker_id = '' COLLATE BINARY
+			AND has_worker_result = 0
+			AND output = '' COLLATE BINARY AND error = '' COLLATE BINARY
+	`, JobRunning, workerID, expected.JobID, expected.TaskType, expected.Payload,
+		expected.TimeoutMs, JobQueued)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	switch affected {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, fmt.Errorf("start queued job: unexpected affected row count %d", affected)
+	}
+}
+
+func (s *SQLiteJobStore) TryRecoverRunning(expected JobRecord) (bool, error) {
+	if err := validateRunningRepair(expected); err != nil {
+		return false, err
+	}
+	result, err := s.db.Exec(`
+		UPDATE jobs SET state = ?
+		WHERE job_id = ? AND state = ? AND attempt_id = ?
+			AND worker_id = ? COLLATE BINARY
+			AND task_type = ? COLLATE BINARY AND payload = ? COLLATE BINARY
+			AND timeout_ms = ? AND has_worker_result = 0
+			AND output = '' COLLATE BINARY AND error = '' COLLATE BINARY
+	`, JobRecovering, expected.JobID, JobRunning, expected.AttemptID, expected.WorkerID,
+		expected.TaskType, expected.Payload, expected.TimeoutMs)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	switch affected {
+	case 0:
+		return false, nil
+	case 1:
+		return true, nil
+	default:
+		return false, fmt.Errorf("recover running job: unexpected affected row count %d", affected)
+	}
+}
+
+// Save inserts or updates mutable fields in one statement, guarded by exact
+// stored-spec equality. Storage/result errors do not establish whether it committed.
 func (s *SQLiteJobStore) Save(record JobRecord) error {
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		INSERT INTO jobs(
 			job_id,
 			state,
@@ -79,16 +181,22 @@ func (s *SQLiteJobStore) Save(record JobRecord) error {
 			worker_id,
 			task_type,
 			payload,
-			timeout_ms
+			timeout_ms,
+			has_worker_result,
+			output,
+			error
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id) DO UPDATE SET
 			state = excluded.state,
 			attempt_id = excluded.attempt_id,
 			worker_id = excluded.worker_id,
-			task_type = excluded.task_type,
-			payload = excluded.payload,
-			timeout_ms = excluded.timeout_ms
+			has_worker_result = excluded.has_worker_result,
+			output = excluded.output,
+			error = excluded.error
+		WHERE jobs.task_type = excluded.task_type COLLATE BINARY
+			AND jobs.payload = excluded.payload COLLATE BINARY
+			AND jobs.timeout_ms = excluded.timeout_ms
 	`,
 		record.JobID,
 		record.State,
@@ -97,9 +205,26 @@ func (s *SQLiteJobStore) Save(record JobRecord) error {
 		record.TaskType,
 		record.Payload,
 		record.TimeoutMs,
+		record.HasWorkerResult,
+		record.Output,
+		record.Error,
 	)
 
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	switch affected {
+	case 0:
+		return ErrJobSpecConflict
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("save job: unexpected affected row count %d", affected)
+	}
 }
 
 func (s *SQLiteJobStore) Load(
@@ -116,7 +241,10 @@ func (s *SQLiteJobStore) Load(
 			worker_id,
 			task_type,
 			payload,
-			timeout_ms
+			timeout_ms,
+			has_worker_result,
+			output,
+			error
 		FROM jobs
 		WHERE job_id = ?
 	`, jobID).Scan(
@@ -127,6 +255,9 @@ func (s *SQLiteJobStore) Load(
 		&record.TaskType,
 		&record.Payload,
 		&record.TimeoutMs,
+		&record.HasWorkerResult,
+		&record.Output,
+		&record.Error,
 	)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -157,7 +288,10 @@ func (s *SQLiteJobStore) ListByState(
 			worker_id,
 			task_type,
 			payload,
-			timeout_ms
+			timeout_ms,
+			has_worker_result,
+			output,
+			error
 		FROM jobs
 		WHERE state = ?
 	`, state)
@@ -180,6 +314,9 @@ func (s *SQLiteJobStore) ListByState(
 			&record.TaskType,
 			&record.Payload,
 			&record.TimeoutMs,
+			&record.HasWorkerResult,
+			&record.Output,
+			&record.Error,
 		); err != nil {
 			return nil, err
 		}

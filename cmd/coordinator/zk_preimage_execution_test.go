@@ -32,6 +32,16 @@ func newRecordingPreimageStore() *recordingPreimageStore {
 	return &recordingPreimageStore{MemoryJobStores: NewMemoryJobStore()}
 }
 
+func (s *recordingPreimageStore) Create(record JobRecord) (bool, error) {
+	created, err := s.MemoryJobStores.Create(record)
+	if created && err == nil {
+		s.mu.Lock()
+		s.saves = append(s.saves, record)
+		s.mu.Unlock()
+	}
+	return created, err
+}
+
 func (s *recordingPreimageStore) Save(record JobRecord) error {
 	if err := s.MemoryJobStores.Save(record); err != nil {
 		return err
@@ -98,7 +108,7 @@ func submitPreimageJob(t *testing.T, s *CoordinatorServer, jobID int64, payload 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+	return s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{
 		JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
 	})
 }
@@ -137,7 +147,7 @@ func TestSubmitPreimageAcceptsValidProof(t *testing.T) {
 	}
 	assertPreimageSaves(t, store, []JobRecord{
 		preimageRecord(701, 1, "prover", JobRunning, payload),
-		preimageRecord(701, 1, "prover", JobSucceeded, payload),
+		withWorkerResult(preimageRecord(701, 1, "prover", JobSucceeded, payload), output, ""),
 	})
 }
 
@@ -176,7 +186,7 @@ func TestSubmitPreimageRetriesInvalidProof(t *testing.T) {
 	assertPreimageSaves(t, store, []JobRecord{
 		preimageRecord(702, 1, "first", JobRunning, payload),
 		preimageRecord(702, 2, "second", JobRunning, payload),
-		preimageRecord(702, 2, "second", JobSucceeded, payload),
+		withWorkerResult(preimageRecord(702, 2, "second", JobSucceeded, payload), validOutput, ""),
 	})
 }
 
@@ -300,7 +310,7 @@ func TestSubmitPreimageTerminalFailureSkipsVerifier(t *testing.T) {
 			}
 			assertPreimageSaves(t, store, []JobRecord{
 				preimageRecord(706, 1, "terminal", JobRunning, payload),
-				preimageRecord(706, 1, "terminal", tc.state, payload),
+				withWorkerResult(preimageRecord(706, 1, "terminal", tc.state, payload), "", "task error"),
 			})
 		})
 	}
@@ -317,7 +327,7 @@ func TestSubmitNonZKSuccessSkipsPreimageVerifier(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+	resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{
 		JobId: 707, TaskType: "hash", Payload: "hello", TimeoutMs: preimageTestTimeoutMs,
 	})
 	if err != nil || resp == nil || resp.Status != "Succeeded" || resp.AttemptId != 1 || calls.Load() != 1 {

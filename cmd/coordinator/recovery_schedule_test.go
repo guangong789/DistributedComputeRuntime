@@ -196,11 +196,12 @@ func TestRecoverySchedulerBusyWorkerBecomesAvailable(t *testing.T) {
 	waitRecoverySignal(t, terminal)
 	stop()
 	want.State, want.AttemptID = JobSucceeded, 10
+	want = withWorkerResult(want, storedProofOutput(t, store, record.JobID, fixture), "")
 	assertRecoveryRecord(t, store, want)
 	if calls.Load() != 3 || proving.samples.Load() != 1 || observer.count("verification", "") != 1 || observer.count("started", "") != 3 || observer.count("finished", "") != 3 || observer.count("submitted", "") != 0 || observer.count("terminal", "") != 1 {
 		t.Fatalf("incorrect execution metrics: %+v", observer.snapshot())
 	}
-	if len(q.entries) != 0 || !q.deadline().IsZero() {
+	if len(q.entries) != 0 || !q.deadline(nil).IsZero() {
 		t.Fatal("terminal job retained a retry")
 	}
 	assertRecoveryOwnershipReleased(t, s, record.JobID)
@@ -211,6 +212,7 @@ func TestRecoverySchedulerBusyWorkerBecomesAvailable(t *testing.T) {
 	repaired.State = JobRecovering
 	running10 := want
 	running10.State = JobRunning
+	running10.HasWorkerResult, running10.Output, running10.Error = false, "", ""
 	assertWorkerFailureSaves(t, store, []JobRecord{record, running8, running9, repaired, running10, want})
 }
 
@@ -271,6 +273,7 @@ func TestRecoverySchedulerCoolingJobDoesNotBlockOthers(t *testing.T) {
 	assertRecoveryRecord(t, inner, a)
 	for _, r := range []JobRecord{b, d} {
 		r.State, r.AttemptID, r.WorkerID = JobSucceeded, 8, "worker"
+		r = withWorkerResult(r, "done", "")
 		assertRecoveryRecord(t, inner, r)
 	}
 	if calls.Load() != 2 || len(q.entries) != 1 {
@@ -318,6 +321,7 @@ func TestRecoverySchedulerNoWorkerAndOwnershipRecheck(t *testing.T) {
 				t.Fatal(err)
 			}
 			r.State, r.AttemptID, r.WorkerID = JobSucceeded, 8, "worker"
+			r = withWorkerResult(r, "done", "")
 			assertRecoveryRecord(t, s.jobStore, r)
 			if len(q.entries) != 0 {
 				t.Fatal("completed job still scheduled")
@@ -389,7 +393,12 @@ func TestRecoverySchedulerScanFailureTimer(t *testing.T) {
 			passes <- struct{}{}
 		}
 	}
-	s := &CoordinatorServer{metrics: observer, recoveryReady: make(chan struct{}, 1), jobStore: &recoveryPassStore{list: func(JobState) ([]JobRecord, error) {
+	var queuedScans atomic.Int32
+	s := &CoordinatorServer{metrics: observer, recoveryReady: make(chan struct{}, 1), jobStore: &recoveryPassStore{list: func(state JobState) ([]JobRecord, error) {
+		if state == JobQueued {
+			queuedScans.Add(1)
+			return nil, nil
+		}
 		if scans.Add(1) <= 2 {
 			return nil, errors.New("temporary scan failure")
 		}
@@ -416,7 +425,7 @@ func TestRecoverySchedulerScanFailureTimer(t *testing.T) {
 	c.advance(2 * time.Second)
 	waitRecoverySignal(t, passes)
 	stop()
-	if scans.Load() != 3 || len(q.entries) != 0 || !q.scan.nextRetry.IsZero() || observer.count("started", "") != 0 || observer.count("execution", "") != 0 || observer.count("pass", "") != 3 {
+	if scans.Load() != 3 || queuedScans.Load() != 1 || len(q.entries) != 0 || !q.scan.nextRetry.IsZero() || observer.count("started", "") != 0 || observer.count("execution", "") != 0 || observer.count("pass", "") != 3 {
 		t.Fatal("scan retry fabricated execution or retained stale deadlines")
 	}
 }
@@ -428,15 +437,22 @@ func TestRecoverySchedulerRepairFailureDoesNotRetryRunning(t *testing.T) {
 	r := recoveringTestRecord()
 	saveRecoveryRecord(t, inner, r)
 	observer := &recordingMetrics{}
-	s := &CoordinatorServer{metrics: observer, jobStore: &recoveryPassStore{JobStore: inner, save: func(r JobRecord) error {
-		if r.State == JobRecovering {
-			return errors.New("repair failed")
+	var healthy atomic.Bool
+	s := &CoordinatorServer{metrics: observer, lifecycle: newCoordinatorLifecycle(), jobStore: &recoveryPassStore{JobStore: inner, recoverRunning: func(r JobRecord) (bool, error) {
+		if !healthy.Load() {
+			return false, errors.New("repair failed")
 		}
-		return inner.Save(r)
+		return inner.TryRecoverRunning(r)
 	}}}
 	var calls atomic.Int32
-	registerTestWorker(t, s, "worker", func(context.Context, *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+	registerTestWorker(t, s, "worker", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		calls.Add(1)
+		if healthy.Load() {
+			if req.AttemptId != 10 {
+				t.Errorf("reconciled recovery dispatched attempt %d, want 10", req.AttemptId)
+			}
+			return successfulResult(req), nil
+		}
 		return nil, status.Error(codes.Unavailable, "injected")
 	})
 	if err := s.runScheduledRecoveryPass(context.Background(), q); err != nil {
@@ -444,7 +460,7 @@ func TestRecoverySchedulerRepairFailureDoesNotRetryRunning(t *testing.T) {
 	}
 	r.State, r.AttemptID, r.WorkerID = JobRunning, 9, "worker"
 	assertRecoveryRecord(t, inner, r)
-	if len(q.entries) != 0 || !q.deadline().IsZero() || observer.count("repair_failed", "") != 1 {
+	if len(q.entries) != 0 || !q.deadline(nil).IsZero() || observer.count("repair_failed", "") != 1 {
 		t.Fatal("failed repair scheduled stranded Running")
 	}
 	c.advance(time.Hour)
@@ -453,6 +469,24 @@ func TestRecoverySchedulerRepairFailureDoesNotRetryRunning(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatal("stranded Running retried")
+	}
+	assertQueuedSessionReleased(t, s, r.JobID, true)
+	s.runQueuedReconciliationPass(context.Background(), q)
+	if !s.hasQueuedReconciliation(r.JobID) || calls.Load() != 2 {
+		t.Fatal("failed reconciliation lost responsibility or dispatched Running")
+	}
+	healthy.Store(true)
+	c.advance(time.Second)
+	s.runQueuedReconciliationPass(context.Background(), q)
+	r.State = JobRecovering
+	assertRecoveryRecord(t, inner, r)
+	if err := s.runScheduledRecoveryPass(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	r.State, r.AttemptID, r.HasWorkerResult, r.Output = JobSucceeded, 10, true, "done"
+	assertRecoveryRecord(t, inner, r)
+	if calls.Load() != 3 || s.hasQueuedReconciliation(r.JobID) {
+		t.Fatal("healed storage did not resume ordinary recovery")
 	}
 	assertRecoveryOwnershipReleased(t, s, r.JobID)
 }
@@ -522,7 +556,7 @@ func TestRecoverySchedulerRestartResetsCooldownNotGeneration(t *testing.T) {
 	if err := b.runScheduledRecoveryPass(context.Background(), fresh); err != nil {
 		t.Fatal(err)
 	}
-	assertRecoveryRecord(t, store, JobRecord{JobID: 9810, State: JobSucceeded, AttemptID: 2, WorkerID: "new-worker", TaskType: "hash", Payload: "saved-task", TimeoutMs: 1500})
+	assertRecoveryRecord(t, store, JobRecord{JobID: 9810, State: JobSucceeded, AttemptID: 2, WorkerID: "new-worker", TaskType: "hash", Payload: "saved-task", TimeoutMs: 1500, HasWorkerResult: true, Output: "done"})
 	if calls.Load() != 1 || len(fresh.entries) != 0 {
 		t.Fatal("new scheduler inherited old cooldown")
 	}
@@ -717,11 +751,11 @@ func TestRecoveryExecutionResultDistinguishesTerminalFromSkip(t *testing.T) {
 		return successfulResult(req), nil
 	})
 	accepted, err := s.retryRecoveringJobResult(context.Background(), r)
-	if err != nil || !accepted.executed || !accepted.terminal || accepted.repairFailed || accepted.generation != 8 {
+	if err != nil || !accepted.executed || !accepted.terminal || accepted.reconciliationPending || accepted.generation != 8 {
 		t.Fatalf("accepted result=%+v error=%v", accepted, err)
 	}
 	skipped, err := s.retryRecoveringJobResult(context.Background(), r)
-	if err != nil || skipped.executed || skipped.terminal || skipped.repairFailed {
+	if err != nil || skipped.executed || skipped.terminal || skipped.reconciliationPending {
 		t.Fatalf("stale nil error counted as execution: result=%+v error=%v", skipped, err)
 	}
 	assertRecoveryOwnershipReleased(t, s, r.JobID)

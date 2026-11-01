@@ -124,6 +124,7 @@ const (
 	CoordinatorService_RegisterWorker_FullMethodName = "/runtime.CoordinatorService/RegisterWorker"
 	CoordinatorService_SubmitJob_FullMethodName      = "/runtime.CoordinatorService/SubmitJob"
 	CoordinatorService_Heartbeat_FullMethodName      = "/runtime.CoordinatorService/Heartbeat"
+	CoordinatorService_GetJob_FullMethodName         = "/runtime.CoordinatorService/GetJob"
 )
 
 // CoordinatorServiceClient is the client API for CoordinatorService service.
@@ -133,6 +134,8 @@ type CoordinatorServiceClient interface {
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*RegisterWorkerResponse, error)
 	SubmitJob(ctx context.Context, in *SubmitJobRequest, opts ...grpc.CallOption) (*SubmitJobResponse, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	// Read one persisted snapshot; does not submit or schedule the Job.
+	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*GetJobResponse, error)
 }
 
 type coordinatorServiceClient struct {
@@ -173,6 +176,16 @@ func (c *coordinatorServiceClient) Heartbeat(ctx context.Context, in *HeartbeatR
 	return out, nil
 }
 
+func (c *coordinatorServiceClient) GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*GetJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetJobResponse)
+	err := c.cc.Invoke(ctx, CoordinatorService_GetJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CoordinatorServiceServer is the server API for CoordinatorService service.
 // All implementations must embed UnimplementedCoordinatorServiceServer
 // for forward compatibility.
@@ -180,6 +193,8 @@ type CoordinatorServiceServer interface {
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*RegisterWorkerResponse, error)
 	SubmitJob(context.Context, *SubmitJobRequest) (*SubmitJobResponse, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	// Read one persisted snapshot; does not submit or schedule the Job.
+	GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error)
 	mustEmbedUnimplementedCoordinatorServiceServer()
 }
 
@@ -198,6 +213,9 @@ func (UnimplementedCoordinatorServiceServer) SubmitJob(context.Context, *SubmitJ
 }
 func (UnimplementedCoordinatorServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedCoordinatorServiceServer) GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetJob not implemented")
 }
 func (UnimplementedCoordinatorServiceServer) mustEmbedUnimplementedCoordinatorServiceServer() {}
 func (UnimplementedCoordinatorServiceServer) testEmbeddedByValue()                            {}
@@ -274,6 +292,24 @@ func _CoordinatorService_Heartbeat_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CoordinatorService_GetJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoordinatorServiceServer).GetJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CoordinatorService_GetJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoordinatorServiceServer).GetJob(ctx, req.(*GetJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CoordinatorService_ServiceDesc is the grpc.ServiceDesc for CoordinatorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -292,6 +328,10 @@ var CoordinatorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _CoordinatorService_Heartbeat_Handler,
+		},
+		{
+			MethodName: "GetJob",
+			Handler:    _CoordinatorService_GetJob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

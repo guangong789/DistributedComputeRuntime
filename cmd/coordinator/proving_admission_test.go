@@ -74,15 +74,15 @@ func TestSubmitBusyProvingWorkerRetriesAvailableWorker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	const jobID int64 = 9603
-	resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove",
+	resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove",
 		Payload: fixture.payload, TimeoutMs: preimageTestTimeoutMs})
 	if err != nil || resp == nil || resp.Status != "Succeeded" || resp.AttemptId != 2 {
 		t.Fatalf("busy worker was treated as terminal failure: response=%v error=%v", resp, err)
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{
+	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
 		preimageRecord(jobID, 1, "busy-worker", JobRunning, fixture.payload),
 		preimageRecord(jobID, 2, "available-worker", JobRunning, fixture.payload),
-		preimageRecord(jobID, 2, "available-worker", JobSucceeded, fixture.payload),
+		withWorkerResult(preimageRecord(jobID, 2, "available-worker", JobSucceeded, fixture.payload), resp.Output, ""),
 	})
 	if busyCalls.Load() != 1 || availableCalls.Load() != 1 || busyMetrics.samples.Load() != 0 || availableMetrics.samples.Load() != 1 {
 		t.Fatal("busy worker proved or retry entered Prove more than once")

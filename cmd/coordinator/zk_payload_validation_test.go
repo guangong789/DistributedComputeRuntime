@@ -108,7 +108,7 @@ func TestSubmitCanonicalZKPayloadPersistsAndRetries(t *testing.T) {
 	client := startTestCoordinator(t, s)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 9903, TaskType: "zk_preimage_prove", Payload: legacy, TimeoutMs: preimageTestTimeoutMs})
+	resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 9903, TaskType: "zk_preimage_prove", Payload: legacy, TimeoutMs: preimageTestTimeoutMs})
 	if err != nil || resp == nil || resp.Status != "Succeeded" || resp.AttemptId != 2 || failedCalls.Load() != 1 || proofCalls.Load() != 1 {
 		t.Fatal("valid canonical job did not retry/succeed")
 	}
@@ -116,8 +116,8 @@ func TestSubmitCanonicalZKPayloadPersistsAndRetries(t *testing.T) {
 	if err != nil || fixture.verifier.Verify(proof, digest) != nil {
 		t.Fatal("real returned proof did not verify")
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{
-		preimageRecord(9903, 1, "busy", JobRunning, fixture.payload), preimageRecord(9903, 2, "prover", JobRunning, fixture.payload), preimageRecord(9903, 2, "prover", JobSucceeded, fixture.payload),
+	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
+		preimageRecord(9903, 1, "busy", JobRunning, fixture.payload), preimageRecord(9903, 2, "prover", JobRunning, fixture.payload), withWorkerResult(preimageRecord(9903, 2, "prover", JobSucceeded, fixture.payload), resp.Output, ""),
 	})
 	assertRecoveryOwnershipReleased(t, s, 9903)
 }

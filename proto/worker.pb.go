@@ -21,6 +21,69 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Wire states are independent of database state numbers. UNSPECIFIED is never
+// returned by a successful GetJob operation.
+type JobState int32
+
+const (
+	JobState_JOB_STATE_UNSPECIFIED JobState = 0
+	JobState_JOB_STATE_QUEUED      JobState = 1
+	JobState_JOB_STATE_RUNNING     JobState = 2
+	JobState_JOB_STATE_RECOVERING  JobState = 3
+	JobState_JOB_STATE_SUCCEEDED   JobState = 4
+	JobState_JOB_STATE_FAILED      JobState = 5
+	JobState_JOB_STATE_CANCELLED   JobState = 6
+)
+
+// Enum value maps for JobState.
+var (
+	JobState_name = map[int32]string{
+		0: "JOB_STATE_UNSPECIFIED",
+		1: "JOB_STATE_QUEUED",
+		2: "JOB_STATE_RUNNING",
+		3: "JOB_STATE_RECOVERING",
+		4: "JOB_STATE_SUCCEEDED",
+		5: "JOB_STATE_FAILED",
+		6: "JOB_STATE_CANCELLED",
+	}
+	JobState_value = map[string]int32{
+		"JOB_STATE_UNSPECIFIED": 0,
+		"JOB_STATE_QUEUED":      1,
+		"JOB_STATE_RUNNING":     2,
+		"JOB_STATE_RECOVERING":  3,
+		"JOB_STATE_SUCCEEDED":   4,
+		"JOB_STATE_FAILED":      5,
+		"JOB_STATE_CANCELLED":   6,
+	}
+)
+
+func (x JobState) Enum() *JobState {
+	p := new(JobState)
+	*p = x
+	return p
+}
+
+func (x JobState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (JobState) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_worker_proto_enumTypes[0].Descriptor()
+}
+
+func (JobState) Type() protoreflect.EnumType {
+	return &file_proto_worker_proto_enumTypes[0]
+}
+
+func (x JobState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use JobState.Descriptor instead.
+func (JobState) EnumDescriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{0}
+}
+
 type ExecuteJobRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	JobId         int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
@@ -509,6 +572,145 @@ func (x *HeartbeatResponse) GetAccepted() bool {
 	return false
 }
 
+type GetJobRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Same opaque signed int64 identity as SubmitJob; zero and negative IDs are valid.
+	JobId         int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetJobRequest) Reset() {
+	*x = GetJobRequest{}
+	mi := &file_proto_worker_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetJobRequest) ProtoMessage() {}
+
+func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetJobRequest.ProtoReflect.Descriptor instead.
+func (*GetJobRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *GetJobRequest) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+type GetJobResponse struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	JobId     int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	State     JobState               `protobuf:"varint,2,opt,name=state,proto3,enum=runtime.JobState" json:"state,omitempty"`
+	AttemptId int64                  `protobuf:"varint,3,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	WorkerId  string                 `protobuf:"bytes,4,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Accepted Worker result presence, independent of empty output/error strings.
+	// False for legacy rows and Coordinator terminal decisions without a result.
+	HasWorkerResult bool   `protobuf:"varint,5,opt,name=has_worker_result,json=hasWorkerResult,proto3" json:"has_worker_result,omitempty"`
+	Output          string `protobuf:"bytes,6,opt,name=output,proto3" json:"output,omitempty"`
+	Error           string `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetJobResponse) Reset() {
+	*x = GetJobResponse{}
+	mi := &file_proto_worker_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetJobResponse) ProtoMessage() {}
+
+func (x *GetJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetJobResponse.ProtoReflect.Descriptor instead.
+func (*GetJobResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GetJobResponse) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+func (x *GetJobResponse) GetState() JobState {
+	if x != nil {
+		return x.State
+	}
+	return JobState_JOB_STATE_UNSPECIFIED
+}
+
+func (x *GetJobResponse) GetAttemptId() int64 {
+	if x != nil {
+		return x.AttemptId
+	}
+	return 0
+}
+
+func (x *GetJobResponse) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *GetJobResponse) GetHasWorkerResult() bool {
+	if x != nil {
+		return x.HasWorkerResult
+	}
+	return false
+}
+
+func (x *GetJobResponse) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
+func (x *GetJobResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 var File_proto_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_proto_rawDesc = "" +
@@ -551,14 +753,34 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"/\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted2V\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\"&\n" +
+	"\rGetJobRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\xe6\x01\n" +
+	"\x0eGetJobResponse\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12'\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x11.runtime.JobStateR\x05state\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x03 \x01(\x03R\tattemptId\x12\x1b\n" +
+	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12*\n" +
+	"\x11has_worker_result\x18\x05 \x01(\bR\x0fhasWorkerResult\x12\x16\n" +
+	"\x06output\x18\x06 \x01(\tR\x06output\x12\x14\n" +
+	"\x05error\x18\a \x01(\tR\x05error*\xb4\x01\n" +
+	"\bJobState\x12\x19\n" +
+	"\x15JOB_STATE_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10JOB_STATE_QUEUED\x10\x01\x12\x15\n" +
+	"\x11JOB_STATE_RUNNING\x10\x02\x12\x18\n" +
+	"\x14JOB_STATE_RECOVERING\x10\x03\x12\x17\n" +
+	"\x13JOB_STATE_SUCCEEDED\x10\x04\x12\x14\n" +
+	"\x10JOB_STATE_FAILED\x10\x05\x12\x17\n" +
+	"\x13JOB_STATE_CANCELLED\x10\x062V\n" +
 	"\rWorkerService\x12E\n" +
 	"\n" +
-	"ExecuteJob\x12\x1a.runtime.ExecuteJobRequest\x1a\x1b.runtime.ExecuteJobResponse2\xef\x01\n" +
+	"ExecuteJob\x12\x1a.runtime.ExecuteJobRequest\x1a\x1b.runtime.ExecuteJobResponse2\xaa\x02\n" +
 	"\x12CoordinatorService\x12Q\n" +
 	"\x0eRegisterWorker\x12\x1e.runtime.RegisterWorkerRequest\x1a\x1f.runtime.RegisterWorkerResponse\x12B\n" +
 	"\tSubmitJob\x12\x19.runtime.SubmitJobRequest\x1a\x1a.runtime.SubmitJobResponse\x12B\n" +
-	"\tHeartbeat\x12\x19.runtime.HeartbeatRequest\x1a\x1a.runtime.HeartbeatResponseB=Z;github.com/guangong789/DistributedZKRuntime/proto;runtimepbb\x06proto3"
+	"\tHeartbeat\x12\x19.runtime.HeartbeatRequest\x1a\x1a.runtime.HeartbeatResponse\x129\n" +
+	"\x06GetJob\x12\x16.runtime.GetJobRequest\x1a\x17.runtime.GetJobResponseB=Z;github.com/guangong789/DistributedZKRuntime/proto;runtimepbb\x06proto3"
 
 var (
 	file_proto_worker_proto_rawDescOnce sync.Once
@@ -572,31 +794,38 @@ func file_proto_worker_proto_rawDescGZIP() []byte {
 	return file_proto_worker_proto_rawDescData
 }
 
-var file_proto_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_proto_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_proto_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_proto_worker_proto_goTypes = []any{
-	(*ExecuteJobRequest)(nil),      // 0: runtime.ExecuteJobRequest
-	(*ExecuteJobResponse)(nil),     // 1: runtime.ExecuteJobResponse
-	(*RegisterWorkerRequest)(nil),  // 2: runtime.RegisterWorkerRequest
-	(*RegisterWorkerResponse)(nil), // 3: runtime.RegisterWorkerResponse
-	(*SubmitJobRequest)(nil),       // 4: runtime.SubmitJobRequest
-	(*SubmitJobResponse)(nil),      // 5: runtime.SubmitJobResponse
-	(*HeartbeatRequest)(nil),       // 6: runtime.HeartbeatRequest
-	(*HeartbeatResponse)(nil),      // 7: runtime.HeartbeatResponse
+	(JobState)(0),                  // 0: runtime.JobState
+	(*ExecuteJobRequest)(nil),      // 1: runtime.ExecuteJobRequest
+	(*ExecuteJobResponse)(nil),     // 2: runtime.ExecuteJobResponse
+	(*RegisterWorkerRequest)(nil),  // 3: runtime.RegisterWorkerRequest
+	(*RegisterWorkerResponse)(nil), // 4: runtime.RegisterWorkerResponse
+	(*SubmitJobRequest)(nil),       // 5: runtime.SubmitJobRequest
+	(*SubmitJobResponse)(nil),      // 6: runtime.SubmitJobResponse
+	(*HeartbeatRequest)(nil),       // 7: runtime.HeartbeatRequest
+	(*HeartbeatResponse)(nil),      // 8: runtime.HeartbeatResponse
+	(*GetJobRequest)(nil),          // 9: runtime.GetJobRequest
+	(*GetJobResponse)(nil),         // 10: runtime.GetJobResponse
 }
 var file_proto_worker_proto_depIdxs = []int32{
-	0, // 0: runtime.WorkerService.ExecuteJob:input_type -> runtime.ExecuteJobRequest
-	2, // 1: runtime.CoordinatorService.RegisterWorker:input_type -> runtime.RegisterWorkerRequest
-	4, // 2: runtime.CoordinatorService.SubmitJob:input_type -> runtime.SubmitJobRequest
-	6, // 3: runtime.CoordinatorService.Heartbeat:input_type -> runtime.HeartbeatRequest
-	1, // 4: runtime.WorkerService.ExecuteJob:output_type -> runtime.ExecuteJobResponse
-	3, // 5: runtime.CoordinatorService.RegisterWorker:output_type -> runtime.RegisterWorkerResponse
-	5, // 6: runtime.CoordinatorService.SubmitJob:output_type -> runtime.SubmitJobResponse
-	7, // 7: runtime.CoordinatorService.Heartbeat:output_type -> runtime.HeartbeatResponse
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: runtime.GetJobResponse.state:type_name -> runtime.JobState
+	1,  // 1: runtime.WorkerService.ExecuteJob:input_type -> runtime.ExecuteJobRequest
+	3,  // 2: runtime.CoordinatorService.RegisterWorker:input_type -> runtime.RegisterWorkerRequest
+	5,  // 3: runtime.CoordinatorService.SubmitJob:input_type -> runtime.SubmitJobRequest
+	7,  // 4: runtime.CoordinatorService.Heartbeat:input_type -> runtime.HeartbeatRequest
+	9,  // 5: runtime.CoordinatorService.GetJob:input_type -> runtime.GetJobRequest
+	2,  // 6: runtime.WorkerService.ExecuteJob:output_type -> runtime.ExecuteJobResponse
+	4,  // 7: runtime.CoordinatorService.RegisterWorker:output_type -> runtime.RegisterWorkerResponse
+	6,  // 8: runtime.CoordinatorService.SubmitJob:output_type -> runtime.SubmitJobResponse
+	8,  // 9: runtime.CoordinatorService.Heartbeat:output_type -> runtime.HeartbeatResponse
+	10, // 10: runtime.CoordinatorService.GetJob:output_type -> runtime.GetJobResponse
+	6,  // [6:11] is the sub-list for method output_type
+	1,  // [1:6] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_proto_worker_proto_init() }
@@ -609,13 +838,14 @@ func file_proto_worker_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_worker_proto_rawDesc), len(file_proto_worker_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   8,
+			NumEnums:      1,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
 		GoTypes:           file_proto_worker_proto_goTypes,
 		DependencyIndexes: file_proto_worker_proto_depIdxs,
+		EnumInfos:         file_proto_worker_proto_enumTypes,
 		MessageInfos:      file_proto_worker_proto_msgTypes,
 	}.Build()
 	File_proto_worker_proto = out.File

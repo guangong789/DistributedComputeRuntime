@@ -14,14 +14,53 @@ import (
 	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type workerFailureStore struct {
-	JobStore
-	mu    sync.Mutex
-	saves []JobRecord
+	JobStore JobStore
+	mu       sync.Mutex
+	saves    []JobRecord
+}
+
+var _ JobStore = (*workerFailureStore)(nil)
+
+func (s *workerFailureStore) Load(id int64) (JobRecord, bool, error) {
+	return s.JobStore.Load(id)
+}
+
+func (s *workerFailureStore) ListByState(state JobState) ([]JobRecord, error) {
+	return s.JobStore.ListByState(state)
+}
+
+func (s *workerFailureStore) Create(record JobRecord) (bool, error) {
+	created, err := s.JobStore.Create(record)
+	if created && err == nil {
+		s.mu.Lock()
+		s.saves = append(s.saves, record)
+		s.mu.Unlock()
+	}
+	return created, err
+}
+
+func (s *workerFailureStore) TryStartQueued(expected JobRecord, workerID string) (bool, error) {
+	published, err := s.JobStore.TryStartQueued(expected, workerID)
+	if published && err == nil {
+		expected.State, expected.AttemptID, expected.WorkerID = JobRunning, 1, workerID
+		s.mu.Lock()
+		s.saves = append(s.saves, expected)
+		s.mu.Unlock()
+	}
+	return published, err
+}
+func (s *workerFailureStore) TryRecoverRunning(expected JobRecord) (bool, error) {
+	repaired, err := s.JobStore.TryRecoverRunning(expected)
+	if repaired && err == nil {
+		expected.State = JobRecovering
+		s.mu.Lock()
+		s.saves = append(s.saves, expected)
+		s.mu.Unlock()
+	}
+	return repaired, err
 }
 
 func (s *workerFailureStore) Save(record JobRecord) error {
@@ -89,6 +128,12 @@ func assertWorkerFailureSaves(t *testing.T, store *workerFailureStore, want []Jo
 	}
 }
 
+func assertAdmittedWorkerFailureSaves(t *testing.T, store *workerFailureStore, executionWrites []JobRecord) {
+	t.Helper()
+	want := append([]JobRecord{queuedAdmissionRecord(executionWrites[0])}, executionWrites...)
+	assertWorkerFailureSaves(t, store, want) // Exact history, including ONE Queued admission.
+}
+
 type workerFailureResult struct {
 	resp *runtimepb.SubmitJobResponse
 	err  error
@@ -154,7 +199,7 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 	defer cancel()
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
-		resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
 			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
@@ -200,13 +245,13 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 		t.Fatalf("calls: worker-1=%d worker-2=%d verifier=%d, want 1 each",
 			firstCalls.Load(), secondCalls.Load(), verifier.calls.Load())
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{
+	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
 		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
 		preimageRecord(jobID, 2, "worker-2", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload),
+		withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, ""),
 	})
 	record, ok, err := store.Load(jobID)
-	if err != nil || !ok || record != preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload) {
+	if err != nil || !ok || record != withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, "") {
 		t.Fatalf("durable result=%+v found=%v error=%v", record, ok, err)
 	}
 	if coordinator.isLeaseCurrent(jobID, 1) {
@@ -267,7 +312,7 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 	defer cancel()
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
-		resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
 			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
@@ -338,13 +383,13 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 		t.Fatalf("calls: verifier=%d worker-1=%d worker-2=%d",
 			verifier.calls.Load(), firstCalls.Load(), secondCalls.Load())
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{
+	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
 		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
 		preimageRecord(jobID, 2, "worker-2", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload),
+		withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, ""),
 	})
 	record, ok, err := store.Load(jobID)
-	if err != nil || !ok || record != preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload) {
+	if err != nil || !ok || record != withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, "") {
 		t.Fatalf("late result changed durable record=%+v found=%v error=%v", record, ok, err)
 	}
 }
@@ -371,7 +416,7 @@ func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 	defer cancel()
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
-		resp, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
+		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
 			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
@@ -392,7 +437,7 @@ func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 	}
 	select {
 	case result := <-submitted:
-		if result.resp != nil || status.Code(result.err) != codes.Unavailable {
+		if result.err != nil || result.resp.GetStatus() != "Failed" || result.resp.GetAttemptId() != 2 || result.resp.GetOutput() != "" {
 			t.Fatalf("failed job reported success: response=%+v error=%v", result.resp, result.err)
 		}
 	case <-ctx.Done():
@@ -401,7 +446,7 @@ func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("stopped worker handled %d calls, want 1", calls.Load())
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{
+	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
 		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
 		preimageRecord(jobID, 2, "worker-1", JobRunning, payload),
 		preimageRecord(jobID, 2, "worker-1", JobFailed, payload),

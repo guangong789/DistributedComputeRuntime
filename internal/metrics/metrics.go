@@ -5,6 +5,16 @@ import "time"
 
 type ExecutionSource string
 
+// AdmissionOutcome describes one atomic Create operation, not validation,
+// duplicate prechecks, scheduling, or execution. A store error is uncertain.
+type AdmissionOutcome string
+
+const (
+	AdmissionAccepted   AdmissionOutcome = "accepted"
+	AdmissionConflict   AdmissionOutcome = "conflict"
+	AdmissionStoreError AdmissionOutcome = "store_error"
+)
+
 const (
 	SourceSubmit   ExecutionSource = "submit"
 	SourceRecovery ExecutionSource = "recovery"
@@ -99,6 +109,7 @@ const (
 // duration. A timeout is represented by WorkerStateChanged with WorkerTimeout,
 // so a backend can derive both a transition and a timeout count from one event.
 type Metrics interface {
+	ObserveJobAdmission(AdmissionOutcome, time.Duration)
 	JobSubmitted(ExecutionSource)
 	JobTerminal(ExecutionSource, TerminalState)
 	ObserveJobExecution(ExecutionSource, time.Duration)
@@ -115,6 +126,8 @@ type Metrics interface {
 }
 
 type NoopMetrics struct{}
+
+func (NoopMetrics) ObserveJobAdmission(AdmissionOutcome, time.Duration) {}
 
 func (NoopMetrics) JobSubmitted(ExecutionSource)                                   {}
 func (NoopMetrics) JobTerminal(ExecutionSource, TerminalState)                     {}

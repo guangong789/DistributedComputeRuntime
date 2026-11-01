@@ -11,7 +11,7 @@ G1 validation used synthetic Python commands, without Go or Groth16. Neither
 those records nor this documentation authorize a new pilot. Any future Groth16
 run requires separate explicit authorization, fresh external evidence and resource
 gates; real N=8 execution must use the accepted D2 Collector, not a bare selector
-or an archived launcher. See the [accepted measurements and limits](../../docs/benchmark-contracts.md#accepted-n8-cpu-pilot).
+or an archived launcher. See the [CPU experiment summary and measurement limits](../../README.en.md#cpu-experiments).
 
 ## Components and origins
 

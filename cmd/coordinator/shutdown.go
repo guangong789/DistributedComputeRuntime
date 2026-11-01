@@ -14,7 +14,7 @@ import (
 )
 
 // Admission has its own lock; it must never wait while holding Coordinator.mu.
-// done closes only after admission is sealed and the last handler has left.
+// done closes after admission is sealed and the last RPC/internal session leaves.
 type admittedCoordinatorRPC struct{ cancel context.CancelFunc }
 
 type coordinatorLifecycle struct {
@@ -38,7 +38,8 @@ func (l *coordinatorLifecycle) tryEnter(ctx context.Context) (context.Context, f
 	if l.draining {
 		return nil, nil, false
 	}
-	// Derive from the authenticated RPC context, retaining its values/deadline.
+	// RPCs supply their authenticated context; synchronous internal sessions
+	// supply l.ctx. The gate tracks the complete operation through finalization.
 	requestCtx, cancel := context.WithCancel(ctx)
 	entry := &admittedCoordinatorRPC{cancel}
 	l.active[entry] = struct{}{}
@@ -176,8 +177,8 @@ func (p *coordinatorProcess) shutdown() error {
 				if p.startupDone != nil {
 					<-p.startupDone
 				}
-				// Both dispatch producers must finish before dispatch Wait: no Add
-				// can race Wait once handlers and the recovery loop have exited.
+				// All dispatch producers must finish before dispatch Wait: no Add
+				// can race Wait after RPCs, internal sessions and recovery exit.
 				<-p.service.lifecycle.done
 				p.background.Wait()
 				p.service.dispatchWG.Wait()

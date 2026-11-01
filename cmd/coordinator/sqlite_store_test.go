@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -105,9 +106,7 @@ func TestSQLiteJobStoreMigratesLegacySchema(t *testing.T) {
 	legacyRunning := JobRecord{JobID: 100, State: JobRunning, AttemptID: 7, WorkerID: "worker-a"}
 	legacySucceeded := JobRecord{JobID: 200, State: JobSucceeded, AttemptID: 3, WorkerID: "worker-b"}
 	updatedRunning := legacyRunning
-	updatedRunning.TaskType = "sleep"
-	updatedRunning.Payload = `{"duration_ms":50}`
-	updatedRunning.TimeoutMs = 500
+	updatedRunning.State, updatedRunning.WorkerID = JobRecovering, "worker-c"
 
 	func() {
 		storeA, err := NewSQLiteJobStore(dbPath)
@@ -126,8 +125,15 @@ func TestSQLiteJobStoreMigratesLegacySchema(t *testing.T) {
 		assertSQLiteStateRecord(t, storeA, legacyRunning)
 		assertSQLiteStateRecord(t, storeA, legacySucceeded)
 
+		// Migration defaults establish exact values; they are not wildcards.
+		replacement := legacyRunning
+		replacement.TaskType, replacement.Payload, replacement.TimeoutMs = "sleep", "50ms", 500
+		if err := storeA.Save(replacement); !errors.Is(err, ErrJobSpecConflict) {
+			t.Fatalf("legacy specification replacement: %v", err)
+		}
+		assertSQLiteJobRecord(t, storeA, legacyRunning)
 		if err := storeA.Save(updatedRunning); err != nil {
-			t.Fatalf("save task specification into migrated database: %v", err)
+			t.Fatalf("save mutable fields into migrated database: %v", err)
 		}
 		assertSQLiteJobRecord(t, storeA, updatedRunning)
 		assertSQLiteStateRecord(t, storeA, updatedRunning)
@@ -147,6 +153,20 @@ func TestSQLiteJobStoreMigratesLegacySchema(t *testing.T) {
 	assertSQLiteJobRecord(t, storeB, legacySucceeded)
 	assertSQLiteStateRecord(t, storeB, updatedRunning)
 	assertSQLiteStateRecord(t, storeB, legacySucceeded)
+
+	// Create also works after migration, without rewriting pre-result terminals.
+	duplicate := withWorkerResult(legacySucceeded, "must not replace legacy data", "other error")
+	duplicate.TaskType, duplicate.Payload, duplicate.AttemptID = "hash", "other input", 99
+	if created, err := storeB.Create(duplicate); created || err != nil {
+		t.Fatalf("Create legacy duplicate: created=%v error=%v", created, err)
+	}
+	assertSQLiteJobRecord(t, storeB, legacySucceeded)
+	newRecord := creationTestRecord()
+	if created, err := storeB.Create(newRecord); !created || err != nil {
+		t.Fatalf("Create after migration: created=%v error=%v", created, err)
+	}
+	assertSQLiteJobRecord(t, storeB, newRecord)
+	assertSQLiteStateRecord(t, storeB, newRecord)
 }
 
 func TestSQLiteJobStoreUpdatesExistingJob(t *testing.T) {

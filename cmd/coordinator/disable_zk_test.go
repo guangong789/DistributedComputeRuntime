@@ -98,7 +98,11 @@ func (s *zkStartupReadStore) ListByState(state JobState) ([]JobRecord, error) {
 }
 func (s *zkStartupReadStore) Save(JobRecord) error { panic("startup guard must not save") }
 
-func TestDisableZKStartupGuardReadsBothStates(t *testing.T) {
+func (s *zkStartupReadStore) Create(JobRecord) (bool, error) {
+	panic("startup guard must not create")
+}
+
+func TestDisableZKStartupGuardReadsUnfinishedStates(t *testing.T) {
 	inner := NewMemoryJobStore()
 	if err := inner.Save(JobRecord{JobID: 1, State: JobRunning, TaskType: "zk_preimage_prove", Payload: "PRIVATE_MARKER"}); err != nil {
 		t.Fatal(err)
@@ -114,7 +118,11 @@ func TestDisableZKStartupGuardReadsBothStates(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), "PRIVATE_MARKER") || (fail && !errors.Is(err, injected)) {
 			t.Fatal("startup rejection", err)
 		}
-		if !reflect.DeepEqual(store.states, []JobState{JobRunning, JobRecovering}) || len(s.jobAttempts) != 0 || len(s.leases) != 0 {
+		wantStates := []JobState{JobRunning, JobRecovering, JobQueued}
+		if fail {
+			wantStates = wantStates[:2]
+		}
+		if !reflect.DeepEqual(store.states, wantStates) || len(s.jobAttempts) != 0 || len(s.leases) != 0 {
 			t.Fatal("guard skipped a state or allocated work")
 		}
 	}
@@ -137,7 +145,7 @@ func TestDisableZKStartupPreservesSQLite(t *testing.T) {
 		state     JobState
 		both      bool
 		malformed bool
-	}{{"running", JobRunning, false, false}, {"recovering", JobRecovering, false, false}, {"both", JobRunning, true, false}, {"malformed", JobRunning, true, true}} {
+	}{{"queued", JobQueued, false, false}, {"running", JobRunning, false, false}, {"recovering", JobRecovering, false, false}, {"both", JobRunning, true, false}, {"malformed", JobRunning, true, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "jobs.db")
 			store, err := NewSQLiteJobStore(path)
@@ -220,6 +228,7 @@ func TestDisableZKRecoveryGateAllowsOrdinaryAndTerminalJobs(t *testing.T) {
 		r.State = JobSucceeded
 		r.AttemptID++
 		r.WorkerID = "ordinary"
+		r = withWorkerResult(r, "done", "")
 		assertSQLiteJobRecord(t, store, r)
 	}
 	for _, r := range records[2:] {
@@ -268,6 +277,7 @@ func TestDisableZKRejectedDatabaseCanResumeEnabled(t *testing.T) {
 	r.State = JobSucceeded
 	r.AttemptID = 8
 	r.WorkerID = "new"
+	r = withWorkerResult(r, "cHJvb2Y=", "")
 	assertSQLiteJobRecord(t, reopened, r)
 	if verifier.calls.Load() != 1 {
 		t.Fatal("enabled recovery bypassed verifier")

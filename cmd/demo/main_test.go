@@ -25,13 +25,13 @@ func TestHashResponseEvidence(t *testing.T) {
 	if expectedHash(req.Payload) != digest {
 		t.Fatal("SHA-256 mismatch")
 	}
-	good := func() *runtimepb.SubmitJobResponse {
-		return &runtimepb.SubmitJobResponse{JobId: 1, AttemptId: 1, Status: "Succeeded", Output: digest}
+	good := func() *runtimepb.GetJobResponse {
+		return &runtimepb.GetJobResponse{JobId: 1, AttemptId: 1, State: runtimepb.JobState_JOB_STATE_SUCCEEDED, WorkerId: "worker-1", HasWorkerResult: true, Output: digest}
 	}
 	if err := validateResponse(req, good()); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"nil", "job", "attempt", "status", "output", "error"} {
+	for _, field := range []string{"nil", "job", "attempt", "status", "output", "error", "presence", "worker"} {
 		t.Run(field, func(t *testing.T) {
 			r := good()
 			switch field {
@@ -42,11 +42,15 @@ func TestHashResponseEvidence(t *testing.T) {
 			case "attempt":
 				r.AttemptId++
 			case "status":
-				r.Status = "Failed"
+				r.State = runtimepb.JobState_JOB_STATE_FAILED
 			case "output":
 				r.Output = "incorrect"
 			case "error":
 				r.Error = "failure"
+			case "presence":
+				r.HasWorkerResult = false
+			case "worker":
+				r.WorkerId = "other"
 			}
 			if validateResponse(req, r) == nil {
 				t.Fatal("incomplete success evidence accepted")
@@ -57,11 +61,11 @@ func TestHashResponseEvidence(t *testing.T) {
 
 func TestSQLiteEvidence(t *testing.T) {
 	req := hashRequest()
-	good := persistedJob{1, 2, 1, "worker-1", "hash", "hello", 5000}
+	good := persistedJob{1, 2, 1, "worker-1", "hash", "hello", 5000, true, expectedHash("hello"), ""}
 	if err := validateRecord(req, good); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"job", "state", "attempt", "worker", "type", "payload", "timeout"} {
+	for _, field := range []string{"job", "state", "attempt", "worker", "type", "payload", "timeout", "presence", "output", "error"} {
 		t.Run(field, func(t *testing.T) {
 			r := good
 			switch field {
@@ -79,6 +83,12 @@ func TestSQLiteEvidence(t *testing.T) {
 				r.Payload = "other"
 			case "timeout":
 				r.TimeoutMs++
+			case "presence":
+				r.HasWorkerResult = false
+			case "output":
+				r.Output = "wrong"
+			case "error":
+				r.Error = "failed"
 			}
 			if validateRecord(req, r) == nil {
 				t.Fatal("inconsistent durable evidence accepted")
@@ -90,8 +100,8 @@ func TestSQLiteEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE jobs (job_id INTEGER PRIMARY KEY, state INTEGER, attempt_id INTEGER, worker_id TEXT, task_type TEXT, payload TEXT, timeout_ms INTEGER);
-INSERT INTO jobs VALUES (1,2,1,'worker-1','hash','hello',5000)`)
+	_, err = db.Exec(`CREATE TABLE jobs (job_id INTEGER PRIMARY KEY, state INTEGER, attempt_id INTEGER, worker_id TEXT, task_type TEXT, payload TEXT, timeout_ms INTEGER, has_worker_result INTEGER, output TEXT, error TEXT);
+INSERT INTO jobs VALUES (1,2,1,'worker-1','hash','hello',5000,1,'2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824','')`)
 	if err != nil {
 		db.Close()
 		t.Fatal(err)

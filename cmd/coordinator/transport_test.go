@@ -29,13 +29,14 @@ import (
 const workerBIdentity = "spiffe://distributedzk.local/worker/worker-b"
 
 type mtlsCoordinator struct {
-	ca        *testpki.CA
-	s         *CoordinatorServer
-	store     *workerFailureStore
-	observer  *recordingMetrics
-	address   string
-	server    *grpc.Server
-	serveDone chan struct{}
+	ca             *testpki.CA
+	s              *CoordinatorServer
+	store          *workerFailureStore
+	observer       *recordingMetrics
+	address        string
+	server         *grpc.Server
+	serveDone      chan struct{}
+	startScheduler func()
 }
 
 func newMTLSCoordinator(t *testing.T, executionOptions ...coordinatorExecutionConfig) *mtlsCoordinator {
@@ -62,7 +63,7 @@ func newMTLSCoordinator(t *testing.T, executionOptions ...coordinatorExecutionCo
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
 	t.Cleanup(func() { server.Stop(); <-done })
-	return &mtlsCoordinator{ca: ca, s: s, store: store, observer: observer,
+	return &mtlsCoordinator{ca: ca, s: s, store: store, observer: observer, startScheduler: prepareQueuedTestScheduler(t, s),
 		address: listener.Addr().String(), server: server, serveDone: done}
 }
 
@@ -78,6 +79,10 @@ func (f *mtlsCoordinator) connection(t *testing.T, identity string) *grpc.Client
 		t.Fatal(err)
 	}
 	return f.connect(t, transport)
+}
+
+func (f *mtlsCoordinator) observingClient(t *testing.T, identity string) runtimepb.CoordinatorServiceClient {
+	return &schedulingTestClient{CoordinatorServiceClient: runtimepb.NewCoordinatorServiceClient(f.connection(t, identity)), start: f.startScheduler, service: f.s}
 }
 func (f *mtlsCoordinator) connect(t *testing.T, transport credentials.TransportCredentials) *grpc.ClientConn {
 	t.Helper()
@@ -180,8 +185,8 @@ func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 	if !ok || w.Status != WorkerAlive || w.Address != address || w.LastSeen.IsZero() || !reflect.DeepEqual(order, []string{"worker-a"}) {
 		t.Fatal("worker recovery did not publish one alive scheduling entry")
 	}
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-	response, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 10001, TaskType: "zk_preimage_prove", Payload: zk.payload, TimeoutMs: 2000})
+	client := f.observingClient(t, testpki.Client)
+	response, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 10001, TaskType: "zk_preimage_prove", Payload: zk.payload, TimeoutMs: 2000})
 	if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 1 || executions.Load() != 1 {
 		t.Fatalf("authorized submission failed: %v", err)
 	}
@@ -226,6 +231,7 @@ func TestCoordinatorMTLSRejectsRolesAndWorkerIDWithoutSideEffects(t *testing.T) 
 		{"Client cannot register", testpki.Client, runtimepb.CoordinatorService_RegisterWorker_FullMethodName, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-b", Address: "attacker"}, &runtimepb.RegisterWorkerResponse{}},
 		{"Client cannot heartbeat", testpki.Client, runtimepb.CoordinatorService_Heartbeat_FullMethodName, &runtimepb.HeartbeatRequest{WorkerId: "worker-b"}, &runtimepb.HeartbeatResponse{}},
 		{"Worker cannot submit", testpki.Worker, runtimepb.CoordinatorService_SubmitJob_FullMethodName, &runtimepb.SubmitJobRequest{JobId: 10002, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}, &runtimepb.SubmitJobResponse{}},
+		{"Worker cannot observe", testpki.Worker, runtimepb.CoordinatorService_GetJob_FullMethodName, &runtimepb.GetJobRequest{JobId: 10002}, &runtimepb.GetJobResponse{}},
 		{"Worker cannot register another ID", testpki.Worker, runtimepb.CoordinatorService_RegisterWorker_FullMethodName, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-b", Address: "attacker"}, &runtimepb.RegisterWorkerResponse{}},
 		{"Worker cannot heartbeat another ID", testpki.Worker, runtimepb.CoordinatorService_Heartbeat_FullMethodName, &runtimepb.HeartbeatRequest{WorkerId: "worker-b"}, &runtimepb.HeartbeatResponse{}},
 		{"unknown method", testpki.Client, "/runtime.CoordinatorService/Unknown", &runtimepb.SubmitJobRequest{}, &runtimepb.SubmitJobResponse{}},
@@ -310,7 +316,7 @@ func TestCoordinatorMTLSRejectsTLSFailuresWithoutSideEffects(t *testing.T) {
 			}
 			client := runtimepb.NewCoordinatorServiceClient(f.connect(t, transport))
 			before := f.snapshot()
-			if response, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 10003, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}); err == nil || response != nil {
+			if response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 10003, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}); err == nil || response != nil {
 				t.Fatal("invalid TLS peer invoked Coordinator")
 			}
 			if response, err := client.RegisterWorker(mtlsContext(t), &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "attacker"}); err == nil || response != nil {
@@ -319,6 +325,9 @@ func TestCoordinatorMTLSRejectsTLSFailuresWithoutSideEffects(t *testing.T) {
 			if response, err := client.Heartbeat(mtlsContext(t), &runtimepb.HeartbeatRequest{WorkerId: "worker-a"}); err == nil || response != nil {
 				t.Fatal("invalid TLS peer reached heartbeat")
 			}
+			if response, err := client.GetJob(mtlsContext(t), &runtimepb.GetJobRequest{JobId: 10003}); err == nil || response != nil {
+				t.Fatal("invalid TLS peer reached GetJob")
+			}
 			f.assertUnchanged(t, before, 10003)
 		})
 	}
@@ -326,9 +335,9 @@ func TestCoordinatorMTLSRejectsTLSFailuresWithoutSideEffects(t *testing.T) {
 
 func TestCoordinatorMTLSAuthenticatedPayloadValidation(t *testing.T) {
 	f := newMTLSCoordinator(t)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	before := f.snapshot()
-	response, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 10004, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"ref","digest":"1","secret":"PRIVATE_MARKER"}`, TimeoutMs: 1000})
+	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 10004, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"ref","digest":"1","secret":"PRIVATE_MARKER"}`, TimeoutMs: 1000})
 	if response != nil || status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("payload validation after authentication: %v", err)
 	}
@@ -465,8 +474,8 @@ func TestCoordinatorMTLSRetryFencingAndLease(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-			response, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 10005, TaskType: "hash", Payload: "hello", TimeoutMs: 2000})
+			client := f.observingClient(t, testpki.Client)
+			response, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 10005, TaskType: "hash", Payload: "hello", TimeoutMs: 2000})
 			if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 2 || firstCalls.Load() != 1 || secondCalls.Load() != 1 || ctx.Err() != nil {
 				t.Fatalf("authenticated retry changed: %v", err)
 			}
@@ -478,7 +487,7 @@ func TestCoordinatorMTLSRetryFencingAndLease(t *testing.T) {
 				}
 			}
 			writes := f.store.savedRecords()
-			if len(writes) != 3 || writes[0].State != JobRunning || writes[0].AttemptID != 1 || writes[1].State != JobRunning || writes[1].AttemptID != 2 || writes[2].State != JobSucceeded || writes[2].AttemptID != 2 || writes[2].WorkerID != "worker-b" {
+			if len(writes) != 4 || !isUnattemptedQueued(writes[0]) || writes[1].State != JobRunning || writes[1].AttemptID != 1 || writes[2].State != JobRunning || writes[2].AttemptID != 2 || writes[3].State != JobSucceeded || writes[3].AttemptID != 2 || writes[3].WorkerID != "worker-b" {
 				t.Fatal("fenced or expired attempt overwrote terminal durable state")
 			}
 			lease, ok := f.s.getLease(10005)
@@ -497,41 +506,49 @@ func TestCoordinatorMTLSOwnershipConflict(t *testing.T) {
 	}
 	defer f.s.releaseJob(10006)
 	before := f.snapshot()
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-	response, err := client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 10006, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
-	if response != nil || status.Code(err) != codes.AlreadyExists {
+	client := f.observingClient(t, testpki.Client)
+	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 10006, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+	if response != nil || status.Code(err) != codes.Aborted {
 		t.Fatalf("authenticated submission bypassed ownership: %v", err)
 	}
 	f.assertUnchanged(t, before, 10006)
 }
 
-func TestCoordinatorMTLSCancellationPersistsWithoutRetry(t *testing.T) {
+func TestCoordinatorMTLSClientCancellationDoesNotCancelJob(t *testing.T) {
 	f := newMTLSCoordinator(t)
 	started := make(chan struct{})
-	canceledSaved := make(chan struct{})
+	terminalSaved := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
 	var calls atomic.Int32
 	f.observer.hook = func(e recordedMetric) {
-		if e.name == "terminal" && e.label == "cancelled" {
-			close(canceledSaved)
+		if e.name == "terminal" && e.label == "succeeded" {
+			close(terminalSaved)
 		}
 	}
 	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, r *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		calls.Add(1)
 		close(started)
-		<-ctx.Done()
-		return nil, ctx.Err()
+		select {
+		case <-release:
+			return successfulResult(r), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	})
 	wait := mtlsContext(t)
 	worker := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Worker))
 	if r, err := worker.RegisterWorker(wait, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address}); err != nil || !r.GetAccepted() {
 		t.Fatal(err)
 	}
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	ctx, cancel := context.WithCancel(wait)
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 10007, TaskType: "hash", Payload: "hello", TimeoutMs: 2000})
+		_, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 10007, TaskType: "hash", Payload: "hello", TimeoutMs: 2000})
 		result <- err
 	}()
 	select {
@@ -548,15 +565,18 @@ func TestCoordinatorMTLSCancellationPersistsWithoutRetry(t *testing.T) {
 	case <-wait.Done():
 		t.Fatal("client cancellation did not finish")
 	}
-	// A canceled gRPC client may return before the server finishes cancellation
-	// persistence. Wait for the post-Save semantic event instead of sleeping.
-	select {
-	case <-canceledSaved:
-	case <-wait.Done():
-		t.Fatal("server did not durably finalize cancellation")
-	}
 	record, ok, err := f.store.Load(10007)
-	if err != nil || !ok || record.State != JobCancelled || record.AttemptID != 1 || record.WorkerID != "worker-a" || calls.Load() != 1 || f.observer.count("started", "") != 1 {
-		t.Fatal("authenticated cancellation did not preserve no-retry durable semantics")
+	if err != nil || !ok || record.State != JobRunning || f.observer.count("terminal", "") != 0 {
+		t.Fatal("client observation cancelled the logical job")
+	}
+	unblock()
+	select {
+	case <-terminalSaved:
+	case <-wait.Done():
+		t.Fatal("independent execution did not finish")
+	}
+	record, ok, err = f.store.Load(10007)
+	if err != nil || !ok || record.State != JobSucceeded || !record.HasWorkerResult || record.AttemptID != 1 || record.WorkerID != "worker-a" || calls.Load() != 1 || f.observer.count("started", "") != 1 {
+		t.Fatal("client cancellation disturbed Coordinator-owned execution")
 	}
 }

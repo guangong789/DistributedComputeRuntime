@@ -47,6 +47,9 @@ func (p *Policy) AuthorizeRPC(principal Principal, method string, request any) e
 	allowed := false
 	if p.recognizes(principal) {
 		switch method {
+		case runtimepb.CoordinatorService_GetJob_FullMethodName:
+			req, ok := request.(*runtimepb.GetJobRequest)
+			allowed = ok && req != nil && principal.Role() == Client
 		case runtimepb.CoordinatorService_SubmitJob_FullMethodName:
 			req, ok := request.(*runtimepb.SubmitJobRequest)
 			allowed = ok && req != nil && principal.Role() == Client

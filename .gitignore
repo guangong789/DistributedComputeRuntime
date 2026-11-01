@@ -58,3 +58,6 @@ private/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Local Go test runs and summaries
+/.test-reports/

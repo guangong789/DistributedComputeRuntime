@@ -15,6 +15,9 @@ func TestAuthorizeRPC(t *testing.T) {
 		req     any
 		allowed Role
 	}{
+		{runtimepb.CoordinatorService_GetJob_FullMethodName, &runtimepb.GetJobRequest{}, Client},
+		{runtimepb.CoordinatorService_GetJob_FullMethodName, (*runtimepb.GetJobRequest)(nil), ""},
+		{runtimepb.CoordinatorService_GetJob_FullMethodName, &runtimepb.SubmitJobRequest{}, ""},
 		{runtimepb.CoordinatorService_SubmitJob_FullMethodName, &runtimepb.SubmitJobRequest{}, Client},
 		{runtimepb.CoordinatorService_RegisterWorker_FullMethodName, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a"}, Worker},
 		{runtimepb.CoordinatorService_Heartbeat_FullMethodName, &runtimepb.HeartbeatRequest{WorkerId: "worker-a"}, Worker},

@@ -29,6 +29,13 @@ func TestRecoveryInfrastructureFailureCanRecoverOnNextOpportunity(t *testing.T) 
 		}
 		writes = append(writes, got)
 		return nil
+	}, recoverRunning: func(got JobRecord) (bool, error) {
+		ok, err := db.TryRecoverRunning(got)
+		if ok && err == nil {
+			got.State = JobRecovering
+			writes = append(writes, got)
+		}
+		return ok, err
 	}}
 	s := &CoordinatorServer{jobStore: store}
 	started := make(chan int64, 1)
@@ -100,6 +107,7 @@ func TestRecoveryInfrastructureFailureCanRecoverOnNextOpportunity(t *testing.T) 
 	running3.State, running3.AttemptID, running3.WorkerID = JobRunning, 3, "usable-worker"
 	succeeded3 := running3
 	succeeded3.State = JobSucceeded
+	succeeded3 = withWorkerResult(succeeded3, "done", "")
 	assertRecoveryRecord(t, db, succeeded3)
 	assertRecoveryOwnershipReleased(t, s, record.JobID)
 	if want := []JobRecord{running2, recovering2, running3, succeeded3}; !reflect.DeepEqual(writes, want) {
@@ -154,67 +162,6 @@ func TestRecoveryCancellationRestoresCurrentGeneration(t *testing.T) {
 	}
 }
 
-func TestRestoreRecoveringJobChecksDurableGenerationAndState(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		state   JobState
-		attempt int64
-		missing bool
-		repair  bool
-	}{
-		{"matching running", JobRunning, 2, false, true},
-		{"succeeded", JobSucceeded, 2, false, false},
-		{"failed", JobFailed, 2, false, false},
-		{"cancelled", JobCancelled, 2, false, false},
-		{"recovering", JobRecovering, 2, false, false},
-		{"older generation", JobRunning, 1, false, false},
-		{"newer generation", JobRunning, 3, false, false},
-		{"missing", JobRunning, 2, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			record := recoveringTestRecord()
-			record.State, record.AttemptID = tc.state, tc.attempt
-			inner := NewMemoryJobStore()
-			if !tc.missing {
-				saveRecoveryRecord(t, inner, record)
-			}
-			saves := 0
-			s := &CoordinatorServer{jobStore: &recoveryPassStore{
-				JobStore: inner,
-				save: func(got JobRecord) error {
-					saves++
-					return inner.Save(got)
-				},
-			}}
-			if !s.claimJob(record.JobID) {
-				t.Fatal("cannot claim job")
-			}
-			defer s.releaseJob(record.JobID)
-			if err := s.restoreRecoveringJob(record.JobID, 2); err != nil {
-				t.Fatal(err)
-			}
-			wantSaves := 0
-			if tc.repair {
-				wantSaves = 1
-				record.State = JobRecovering
-			}
-			if saves != wantSaves {
-				t.Fatalf("repair saves=%d, want %d", saves, wantSaves)
-			}
-			if tc.missing {
-				if _, ok, err := inner.Load(record.JobID); err != nil || ok {
-					t.Fatalf("repair created missing job: found=%v error=%v", ok, err)
-				}
-			} else {
-				assertRecoveryRecord(t, inner, record)
-			}
-			if s.claimJob(record.JobID) {
-				t.Fatal("repair released execution ownership")
-			}
-		})
-	}
-}
-
 func TestRecoveryPreservesAcceptedTerminalResults(t *testing.T) {
 	for _, tc := range []struct {
 		status string
@@ -243,6 +190,7 @@ func TestRecoveryPreservesAcceptedTerminalResults(t *testing.T) {
 			}
 			want := record
 			want.State, want.AttemptID, want.WorkerID = tc.state, 2, "worker"
+			want = withWorkerResult(want, "done", "")
 			assertRecoveryRecord(t, s.jobStore, want)
 			if len(calls) != 1 || <-calls != 2 {
 				t.Fatal("accepted terminal result caused extra attempts")
@@ -294,36 +242,18 @@ func TestFailedRecoveryDoesNotOverwriteAdvancedDurableRecord(t *testing.T) {
 			if s.jobAttempts[record.JobID] != 2 {
 				t.Fatalf("repair allocated an attempt: %v", s.jobAttempts)
 			}
-			assertRecoveryOwnershipReleased(t, s, record.JobID)
-		})
-	}
-}
-
-func TestRestoreRecoveringJobPropagatesStoreErrors(t *testing.T) {
-	for _, operation := range []string{"load", "save"} {
-		t.Run(operation, func(t *testing.T) {
-			record := recoveringTestRecord()
-			record.State, record.AttemptID = JobRunning, 2
-			inner := NewMemoryJobStore()
-			saveRecoveryRecord(t, inner, record)
-			wantErr := errors.New("injected repair store failure")
-			store := &recoveryPassStore{JobStore: inner}
-			if operation == "load" {
-				store.load = func(int64) (JobRecord, bool, error) {
-					return JobRecord{}, false, wantErr
-				}
-			} else {
-				store.save = func(JobRecord) error { return wantErr }
+			s.mu.Lock()
+			_, active := s.activeJobs[record.JobID]
+			pending := s.queuedReconciliations[record.JobID] != nil
+			s.mu.Unlock()
+			if active || pending != (tc.state == JobRunning) {
+				t.Fatalf("settlement ownership: active=%v pending=%v", active, pending)
 			}
-			s := &CoordinatorServer{jobStore: store}
-			if !s.claimJob(record.JobID) {
-				t.Fatal("cannot claim job")
+			if !pending {
+				assertRecoveryOwnershipReleased(t, s, record.JobID)
+			} else if s.claimJob(record.JobID) {
+				t.Fatal("ordinary claim bypassed unresolved newer generation")
 			}
-			defer s.releaseJob(record.JobID)
-			if err := s.restoreRecoveringJob(record.JobID, 2); !errors.Is(err, wantErr) {
-				t.Fatalf("repair error=%v, want %v", err, wantErr)
-			}
-			assertRecoveryRecord(t, inner, record)
 		})
 	}
 }
@@ -334,13 +264,13 @@ func TestRecoveryCancellationReportsRepairFailureAndReleasesOwnership(t *testing
 	inner := NewMemoryJobStore()
 	saveRecoveryRecord(t, inner, record)
 	repairErr := errors.New("cannot save repair")
-	store := &recoveryPassStore{JobStore: inner, save: func(got JobRecord) error {
-		if got.State == JobRecovering && got.AttemptID == 2 {
-			return repairErr
+	store := &recoveryPassStore{JobStore: inner, recoverRunning: func(got JobRecord) (bool, error) {
+		if got.AttemptID == 2 {
+			return false, repairErr
 		}
-		return inner.Save(got)
+		return inner.TryRecoverRunning(got)
 	}}
-	s := &CoordinatorServer{jobStore: store}
+	s := &CoordinatorServer{jobStore: store, lifecycle: newCoordinatorLifecycle()}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	registerTestWorker(t, s, "worker", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
@@ -354,5 +284,5 @@ func TestRecoveryCancellationReportsRepairFailureAndReleasesOwnership(t *testing
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobRunning, 2, "worker"
 	assertRecoveryRecord(t, inner, want)
-	assertRecoveryOwnershipReleased(t, s, record.JobID)
+	assertQueuedSessionReleased(t, s, record.JobID, true)
 }

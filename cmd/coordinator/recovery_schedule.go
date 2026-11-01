@@ -25,7 +25,11 @@ type recoverySchedule struct {
 	scan    retryEntry
 	now     func() time.Time
 	sample  func(int64) int64
+	// Periodic discovery is independent of per-job/ledger cooldowns.
+	nextDiscovery time.Time
 }
+
+const durableDiscoveryInterval = 30 * time.Second
 
 func newRecoverySchedule() *recoverySchedule {
 	return &recoverySchedule{entries: make(map[int64]retryEntry), now: time.Now, sample: rand.Int64N}
@@ -96,7 +100,10 @@ func (q *recoverySchedule) recheck(r JobRecord) {
 }
 
 func (q *recoverySchedule) completed(store JobStore, snapshot JobRecord, result recoveryExecution, executionErr error) error {
-	if result.terminal || result.repairFailed {
+	if result.terminal || result.reconciliationPending {
+		// An unresolved session installed its ledger obligation before releasing
+		// the claim. That ledger owns retries; after retirement the next durable
+		// Recovering scan creates a fresh eligible scheduling entry.
 		delete(q.entries, snapshot.JobID)
 		return nil
 	}
@@ -127,13 +134,25 @@ func (q *recoverySchedule) completed(store JobStore, snapshot JobRecord, result 
 	return err
 }
 
-func (q *recoverySchedule) deadline() time.Time {
+func (q *recoverySchedule) deadline(s *CoordinatorServer) time.Time {
 	// Even an overdue job cannot bypass a failed global scan's retry deadline.
 	if !q.scan.nextRetry.IsZero() {
 		return q.scan.nextRetry
 	}
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
 	var next time.Time
-	for _, e := range q.entries {
+	for id, e := range q.entries {
+		if s != nil {
+			_, active := s.activeJobs[id]
+			if active || s.queuedReconciliations[id] != nil {
+				// Ownership/ledger deadlines take precedence over an overdue
+				// execution cooldown. Retain the entry, avoid a zero-timer spin.
+				continue
+			}
+		}
 		if next.IsZero() || e.nextRetry.Before(next) {
 			next = e.nextRetry
 		}
@@ -173,6 +192,12 @@ func (s *CoordinatorServer) runRecoveryScheduler(ctx context.Context, q *recover
 		if ctx.Err() != nil {
 			return
 		}
+		// Ledger work is independent of Recovering discovery's global scan
+		// backoff. Both responsibilities share this producer, timer and wakeup.
+		s.runQueuedReconciliationPass(ctx, q)
+		if ctx.Err() != nil {
+			return
+		}
 		if !q.now().Before(q.scan.nextRetry) {
 			if err := s.runScheduledRecoveryPass(ctx, q); err != nil {
 				if ctx.Err() != nil {
@@ -180,13 +205,21 @@ func (s *CoordinatorServer) runRecoveryScheduler(ctx context.Context, q *recover
 				}
 				log.Printf("recovery pass failed: %v", err)
 			}
+			q.nextDiscovery = q.now().Add(durableDiscoveryInterval)
 		}
 		if ctx.Err() != nil {
 			return
 		}
 		timer.stop()
 		var tick <-chan time.Time
-		if deadline := q.deadline(); !deadline.IsZero() {
+		deadline := q.deadline(s)
+		if !q.nextDiscovery.IsZero() && (deadline.IsZero() || q.nextDiscovery.Before(deadline)) {
+			deadline = q.nextDiscovery
+		}
+		if pending := s.queuedReconciliationDeadline(q.now()); !pending.IsZero() && (deadline.IsZero() || pending.Before(deadline)) {
+			deadline = pending
+		}
+		if !deadline.IsZero() {
 			delay := deadline.Sub(q.now())
 			if delay < 0 {
 				delay = 0

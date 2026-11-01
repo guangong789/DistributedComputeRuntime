@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -48,7 +47,7 @@ func TestSubmitInfrastructureFailurePersistsAcrossRestart(t *testing.T) {
 	req := &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "persisted-spec", TimeoutMs: 1234}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := s.SubmitJob(ctx, req)
+	resp, err := s.executeSubmissionForTest(ctx, req)
 	if resp != nil || status.Code(err) != codes.Unavailable || calls.Load() != 2 {
 		t.Fatalf("failed session: response=%v error=%v calls=%d", resp, err, calls.Load())
 	}
@@ -98,36 +97,12 @@ func TestSubmitInfrastructureFailurePersistsAcrossRestart(t *testing.T) {
 	if freshCalls.Load() != 0 || len(fresh.jobAttempts) != 0 || len(fresh.leases) != 0 {
 		t.Fatal("restart recovered a finalized failure")
 	}
-	resp, err = fresh.SubmitJob(ctx, req)
-	if err != nil || resp.GetStatus() != "Succeeded" || resp.GetAttemptId() != 3 || freshCalls.Load() != 1 {
-		t.Fatalf("explicit resubmission: response=%v error=%v", resp, err)
+	resp, err = fresh.executeSubmissionForTest(ctx, req)
+	if resp != nil || status.Code(err) != codes.AlreadyExists || freshCalls.Load() != 0 || len(fresh.jobAttempts) != 0 || len(fresh.leases) != 0 {
+		t.Fatalf("terminal resubmission: response=%v error=%v", resp, err)
 	}
-	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 3, "after-restart"
 	assertRecoveryRecord(t, reopened, want)
 	assertRecoveryOwnershipReleased(t, fresh, jobID)
-}
-
-func TestSubmitFailureWithoutNextWorker(t *testing.T) {
-	s := newTestCoordinator()
-	var calls atomic.Int32
-	registerTestWorker(t, s, "only-worker", func(context.Context, *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
-		calls.Add(1)
-		s.mu.Lock()
-		worker := s.workers["only-worker"]
-		worker.Status = WorkerDead
-		s.workers[worker.ID] = worker
-		s.mu.Unlock()
-		return nil, status.Error(codes.Unavailable, "worker lost")
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 9502, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
-	if resp != nil || status.Code(err) != codes.Unavailable || calls.Load() != 1 || s.jobAttempts[9502] != 1 {
-		t.Fatalf("no backup: response=%v error=%v calls=%d", resp, err, calls.Load())
-	}
-	assertRecoveryRecord(t, s.jobStore, JobRecord{JobID: 9502, State: JobFailed, AttemptID: 1,
-		WorkerID: "only-worker", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
-	assertRecoveryOwnershipReleased(t, s, 9502)
 }
 
 func TestPersistSubmitFailureGuards(t *testing.T) {
@@ -280,7 +255,7 @@ func TestSubmitFailureCancellationAndStoreErrors(t *testing.T) {
 				calls.Add(1)
 				return nil, status.Error(codes.Unavailable, "injected RPC failure")
 			})
-			resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "hello", TimeoutMs: 1234})
+			resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "hello", TimeoutMs: 1234})
 			wantState, wantTerminal := JobFailed, metrics.TerminalFailed
 			wantTerminals := 1
 			switch name {
@@ -319,7 +294,7 @@ func TestSubmitFailureUsesExactSessionGeneration(t *testing.T) {
 	for _, id := range []string{"first", "second"} {
 		registerTestWorker(t, s, id, func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 			if req.AttemptId == 2 {
-				if attempt, err := s.startAttempt(req.JobId, "newer-publisher", time.Minute, "hash", "newer-spec", 2000); err != nil || attempt != 3 {
+				if attempt, err := s.startAttempt(req.JobId, "newer-publisher", time.Minute, req.TaskType, req.Payload, req.TimeoutMs); err != nil || attempt != 3 {
 					t.Errorf("publish superseding generation: attempt=%d error=%v", attempt, err)
 				}
 			}
@@ -328,30 +303,13 @@ func TestSubmitFailureUsesExactSessionGeneration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 9505, TaskType: "hash", Payload: "original-spec", TimeoutMs: 1000})
+	resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 9505, TaskType: "hash", Payload: "original-spec", TimeoutMs: 1000})
 	var exhausted *retryExhaustionError
 	if resp != nil || status.Code(err) != codes.Unavailable || !errors.As(err, &exhausted) || exhausted.attemptID != 2 {
 		t.Fatalf("session provenance: response=%v error=%v", resp, err)
 	}
-	assertRecoveryRecord(t, s.jobStore, JobRecord{JobID: 9505, State: JobRunning, AttemptID: 3, WorkerID: "newer-publisher", TaskType: "hash", Payload: "newer-spec", TimeoutMs: 2000})
+	assertRecoveryRecord(t, s.jobStore, JobRecord{JobID: 9505, State: JobRunning, AttemptID: 3, WorkerID: "newer-publisher", TaskType: "hash", Payload: "original-spec", TimeoutMs: 1000})
 	assertRecoveryOwnershipReleased(t, s, 9505)
-}
-
-func TestSubmitWithoutWorkerPreservesExistingRecord(t *testing.T) {
-	for _, state := range []JobState{JobRunning, JobRecovering, JobSucceeded, JobFailed, JobCancelled} {
-		t.Run(fmt.Sprintf("state %d", state), func(t *testing.T) {
-			store := NewMemoryJobStore()
-			want := JobRecord{JobID: 9506, State: state, AttemptID: 7, WorkerID: "old-worker", TaskType: "hash", Payload: "old-spec", TimeoutMs: 1000}
-			saveRecoveryRecord(t, store, want)
-			s := &CoordinatorServer{jobStore: store}
-			resp, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{JobId: want.JobID, TaskType: "hash", Payload: "new-spec", TimeoutMs: 2000})
-			if resp != nil || status.Code(err) != codes.Unavailable || len(s.jobAttempts) != 0 || len(s.leases) != 0 {
-				t.Fatalf("no-worker result=%v error=%v", resp, err)
-			}
-			assertRecoveryRecord(t, store, want)
-			assertRecoveryOwnershipReleased(t, s, want.JobID)
-		})
-	}
 }
 
 func TestSubmitFailureDoesNotReclassifyOtherExits(t *testing.T) {
@@ -359,16 +317,20 @@ func TestSubmitFailureDoesNotReclassifyOtherExits(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			const jobID int64 = 9508
 			inner := NewMemoryJobStore()
-			before := JobRecord{JobID: jobID, State: JobRecovering, AttemptID: 7, WorkerID: "old-worker", TaskType: "hash", Payload: "old-spec", TimeoutMs: 1000}
-			saveRecoveryRecord(t, inner, before)
+			// Start with an unadmitted ID so first Create and subsequent Save
+			// failures remain reachable rather than short-circuiting as duplicates.
 			observer := &recordingMetrics{}
 			store := &recoveryPassStore{JobStore: inner, save: func(record JobRecord) error {
-				if (name == "first publication error" && record.State == JobRunning) ||
-					(name == "second publication error" && record.State == JobRunning && record.AttemptID == 9) ||
+				if (name == "second publication error" && record.State == JobRunning && record.AttemptID == 2) ||
 					(name == "terminal Save error" && record.State == JobSucceeded) {
 					return status.Error(codes.Unavailable, "injected storage failure")
 				}
 				return inner.Save(record)
+			}, create: func(record JobRecord) (bool, error) {
+				if name == "first publication error" {
+					return false, status.Error(codes.Unavailable, "injected Create storage failure")
+				}
+				return inner.Create(record)
 			}}
 			s := &CoordinatorServer{jobStore: store, metrics: observer}
 			var calls atomic.Int32
@@ -390,12 +352,13 @@ func TestSubmitFailureDoesNotReclassifyOtherExits(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "new-spec", TimeoutMs: 2000})
-			want := JobRecord{JobID: jobID, State: JobRunning, AttemptID: 8, WorkerID: "worker", TaskType: "hash", Payload: "new-spec", TimeoutMs: 2000}
+			resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "new-spec", TimeoutMs: 2000})
+			want := JobRecord{JobID: jobID, State: JobRunning, AttemptID: 1, WorkerID: "worker", TaskType: "hash", Payload: "new-spec", TimeoutMs: 2000}
 			wantCalls, wantTerminals := int32(1), 0
 			switch name {
 			case "task Failed", "task Cancelled":
 				wantTerminals = 1
+				want = withWorkerResult(want, "done", "")
 				want.State = JobFailed
 				if name == "task Cancelled" {
 					want.State = JobCancelled
@@ -405,14 +368,20 @@ func TestSubmitFailureDoesNotReclassifyOtherExits(t *testing.T) {
 				}
 			default:
 				if name == "first publication error" {
-					want, wantCalls = before, 0
+					wantCalls = 0
 				}
 				var exhausted *retryExhaustionError
 				if resp != nil || status.Code(err) != codes.Internal || errors.As(err, &exhausted) {
 					t.Fatalf("unrelated exit classified as exhaustion: response=%v error=%v", resp, err)
 				}
 			}
-			assertRecoveryRecord(t, inner, want)
+			if name == "first publication error" {
+				if _, found, err := inner.Load(jobID); found || err != nil {
+					t.Fatalf("failed Create inserted a row: found=%v error=%v", found, err)
+				}
+			} else {
+				assertRecoveryRecord(t, inner, want)
+			}
 			if calls.Load() != wantCalls || observer.count("terminal", "") != wantTerminals {
 				t.Fatalf("calls=%d metrics=%+v", calls.Load(), observer.snapshot())
 			}
@@ -461,13 +430,13 @@ func TestSubmitFailureHoldsOwnershipThroughSave(t *testing.T) {
 	}
 	req := &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "hello", TimeoutMs: 1000}
 	finished := make(chan workerFailureResult, 1)
-	go func() { resp, err := s.SubmitJob(ctx, req); finished <- workerFailureResult{resp, err} }()
+	go func() { resp, err := s.executeSubmissionForTest(ctx, req); finished <- workerFailureResult{resp, err} }()
 	select {
 	case <-entered:
 	case <-ctx.Done():
 		t.Fatal("failure Save did not begin")
 	}
-	go func() { resp, err := s.SubmitJob(ctx, req); contender <- workerFailureResult{resp, err} }()
+	go func() { resp, err := s.executeSubmissionForTest(ctx, req); contender <- workerFailureResult{resp, err} }()
 	unblock()
 	select {
 	case result := <-finished:
@@ -524,7 +493,7 @@ func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
 	defer cancel()
 	finished := make(chan workerFailureResult, 1)
 	go func() {
-		resp, err := s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 1000})
+		resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 1000})
 		finished <- workerFailureResult{resp: resp, err: err}
 	}()
 	select {

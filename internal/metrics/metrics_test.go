@@ -20,6 +20,7 @@ func TestResolveNoopSupportsConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			observer.JobSubmitted(SourceSubmit)
+			observer.ObserveJobAdmission(AdmissionAccepted, time.Millisecond)
 			observer.JobTerminal(SourceRecovery, TerminalSucceeded)
 			observer.ObserveJobExecution(SourceSubmit, time.Second)
 			observer.AttemptStarted(SourceRecovery)

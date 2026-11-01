@@ -27,32 +27,6 @@ func recoveryFailureReason(err error) metrics.RecoveryFailureReason {
 	}
 }
 
-// restoreRecoveringJob repairs an unsuccessful recovery while the caller still
-// owns claimJob. Ownership excludes other normal execution paths on this
-// coordinator. Load/compare/Save is not an atomic conditional store update;
-// multiple coordinators or independent store writers would require one.
-func (s *CoordinatorServer) restoreRecoveringJob(jobID, failedAttempt int64) error {
-	observer := metrics.Resolve(s.metrics)
-	if s.jobStore == nil {
-		return nil
-	}
-	current, ok, err := s.jobStore.Load(jobID)
-	if err != nil {
-		observer.RecoveryRepairFailed(metrics.RepairLoad)
-		return fmt.Errorf("load current job: %w", err)
-	}
-	if !ok || current.State != JobRunning || current.AttemptID != failedAttempt {
-		return nil
-	}
-	current.State = JobRecovering
-	if err := s.jobStore.Save(current); err != nil {
-		observer.RecoveryRepairFailed(metrics.RepairSave)
-		return fmt.Errorf("save recovering job: %w", err)
-	}
-	observer.RecoveryTransition(metrics.RecoveryRepair)
-	return nil
-}
-
 // runRecoveryPass processes one snapshot sequentially. Per-job errors are logged
 // and leave persistence to retryRecoveringJob; only listing failure or cancellation ends
 // the pass early. A nil return means the scan completed, not that every job ran.
@@ -76,6 +50,13 @@ func (s *CoordinatorServer) runScheduledRecoveryPass(ctx context.Context, schedu
 		return nil
 	}
 	records, err := s.jobStore.ListByState(JobRecovering)
+	var queued []JobRecord
+	if err == nil && schedule != nil {
+		queued, err = s.jobStore.ListByState(JobQueued)
+		if err != nil {
+			err = fmt.Errorf("queued discovery: %w", err)
+		}
+	}
 	if err != nil {
 		outcome = metrics.PassStoreError
 		if schedule != nil {
@@ -86,7 +67,11 @@ func (s *CoordinatorServer) runScheduledRecoveryPass(ctx context.Context, schedu
 	}
 	if schedule != nil {
 		schedule.scan = retryEntry{}
-		schedule.reconcile(records)
+		// Reconcile only after BOTH scans succeed. A partial view must never
+		// erase either state's cooldown. Each candidate is reloaded under claim.
+		combined := append(append([]JobRecord(nil), records...), queued...)
+		schedule.reconcile(combined)
+		s.scheduleQueuedJobs(ctx, queued, schedule)
 	}
 	seen := make(map[int64]bool, len(records))
 	for _, snapshot := range records {
@@ -97,6 +82,11 @@ func (s *CoordinatorServer) runScheduledRecoveryPass(ctx context.Context, schedu
 		if err := ctx.Err(); err != nil {
 			outcome = metrics.PassCancelled
 			return err
+		}
+		// Reconciliation owns this job until its ledger entry retires. Do not
+		// turn that ownership contention into an ordinary recovery retry entry.
+		if s.hasQueuedReconciliation(snapshot.JobID) {
+			continue
 		}
 		if schedule != nil && !schedule.eligible(snapshot) {
 			continue

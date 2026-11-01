@@ -104,7 +104,7 @@ func TestMTLSCancellationRetainsProvingSlotAndRejectsLateProof(t *testing.T) {
 	// Direct SubmitJob lets the test wait for server-side cancellation finalization
 	// and ownership release. Its actual Worker RPC still uses production mTLS.
 	go func() {
-		_, err := f.s.SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 11107, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000})
+		_, err := f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 11107, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000})
 		result <- err
 	}()
 	select {
@@ -190,10 +190,10 @@ func TestMTLSLeaseRetryFencesLateSuccessfulProving(t *testing.T) {
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", first)
 	registerMTLSExecutionWorker(t, f, workerBIdentity, "worker-b", second)
 	wait := mtlsContext(t)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	done := make(chan workerFailureResult, 1)
 	go func() {
-		r, err := client.SubmitJob(wait, &runtimepb.SubmitJobRequest{JobId: 11108, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000})
+		r, err := submitAndObserveForTest(wait, client, &runtimepb.SubmitJobRequest{JobId: 11108, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000})
 		done <- workerFailureResult{r, err}
 	}()
 	select {

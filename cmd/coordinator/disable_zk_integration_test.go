@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -197,34 +198,37 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	transport := &http.Transport{}
 	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{Transport: transport, Timeout: time.Second}
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		request, err := http.NewRequestWithContext(recoveryCtx, http.MethodGet, metricsURL, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		response, err := httpClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		response.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if response.StatusCode != http.StatusOK {
-			t.Fatal("metrics status", response.StatusCode)
-		}
-		if strings.Contains(string(data), `dzkr_jobs_terminal_total{source="recovery",state="succeeded"} 2`) {
-			break
-		}
-		select {
-		case <-tick.C:
-		case <-recoveryCtx.Done():
-			t.Fatal("ordinary startup recovery did not finish", coordOut.text())
+	awaitTerminalMetric := func(waitCtx context.Context, source string, count int) {
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			request, err := http.NewRequestWithContext(waitCtx, http.MethodGet, metricsURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := httpClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			response.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK {
+				t.Fatal("metrics status", response.StatusCode)
+			}
+			if strings.Contains(string(data), fmt.Sprintf(`dzkr_jobs_terminal_total{source=%q,state="succeeded"} %d`, source, count)) {
+				break
+			}
+			select {
+			case <-tick.C:
+			case <-waitCtx.Done():
+				t.Fatal("durable terminal metric did not arrive", coordOut.text())
+			}
 		}
 	}
+	awaitTerminalMetric(recoveryCtx, "recovery", 2)
 	audit, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
@@ -235,12 +239,23 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 		record.State = JobSucceeded
 		record.AttemptID++
 		record.WorkerID = "worker-a"
+		sum := sha256.Sum256([]byte(record.Payload))
+		output := hex.EncodeToString(sum[:])
+		if record.TaskType == "sleep" {
+			output = "slept for 1ms"
+		}
+		record = withWorkerResult(record, output, "")
 		assertSQLiteJobRecord(t, reopened, record)
 	}
 	for i, tc := range []struct{ kind, payload, want string }{{"hash", "hello", ""}, {"sleep", "1ms", "slept for 1ms"}} {
 		req := &runtimepb.SubmitJobRequest{JobId: int64(i + 1), TaskType: tc.kind, Payload: tc.payload, TimeoutMs: 1000}
 		rpcCtx, stop := context.WithTimeout(ctx, 5*time.Second)
-		resp, err := client.SubmitJob(rpcCtx, req)
+		ack, err := client.SubmitJob(rpcCtx, req)
+		assertAdmissionAck(t, ack, err, req.JobId)
+		// The terminal counter is emitted AFTER Save. Query GetJob only then
+		// so this default-SQLite process test does not create its own lock race.
+		awaitTerminalMetric(rpcCtx, "submit", i+1)
+		resp, err := observeTerminalForTest(rpcCtx, client, req.JobId)
 		stop()
 		if err != nil || resp.GetStatus() != "Succeeded" || resp.GetJobId() != req.JobId || resp.GetAttemptId() != 1 || resp.GetError() != "" {
 			t.Fatalf("%s response=%v error=%v", tc.kind, resp, err)
@@ -253,11 +268,11 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 		if resp.Output != want {
 			t.Fatalf("%s output=%q want=%q", tc.kind, resp.Output, want)
 		}
-		assertSQLiteJobRecord(t, reopened, JobRecord{JobID: req.JobId, State: JobSucceeded, AttemptID: 1, WorkerID: "worker-a", TaskType: tc.kind, Payload: tc.payload, TimeoutMs: 1000})
+		assertSQLiteJobRecord(t, reopened, JobRecord{JobID: req.JobId, State: JobSucceeded, AttemptID: 1, WorkerID: "worker-a", TaskType: tc.kind, Payload: tc.payload, TimeoutMs: 1000, HasWorkerResult: true, Output: want})
 	}
 	rpcCtx, stop := context.WithTimeout(ctx, 5*time.Second)
 	defer stop()
-	if _, err := client.SubmitJob(rpcCtx, &runtimepb.SubmitJobRequest{JobId: 3, TaskType: "zk_preimage_prove", Payload: "PRIVATE_MARKER", TimeoutMs: 1000}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := submitAndObserveForTest(rpcCtx, client, &runtimepb.SubmitJobRequest{JobId: 3, TaskType: "zk_preimage_prove", Payload: "PRIVATE_MARKER", TimeoutMs: 1000}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatal("disabled admission", err)
 	}
 	if _, ok, err := reopened.Load(3); err != nil || ok {
@@ -281,7 +296,7 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	if _, err := enabled.RegisterWorker(ctx, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: workerAddress}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := enabled.SubmitJob(rpcCtx, &runtimepb.SubmitJobRequest{JobId: 4, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"demo","digest":"1"}`, TimeoutMs: 1000})
+	resp, err := enabled.executeSubmissionForTest(rpcCtx, &runtimepb.SubmitJobRequest{JobId: 4, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"demo","digest":"1"}`, TimeoutMs: 1000})
 	if err != nil || resp.GetStatus() != "Failed" || resp.GetAttemptId() != 1 || resp.GetError() != "ZK tasks are disabled" {
 		t.Fatalf("mismatch=%v error=%v", resp, err)
 	}

@@ -222,9 +222,11 @@ func TestHeartbeatRevivalWakesRecoveryLoop(t *testing.T) {
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, worker.ID
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, store, want)
 	running := want
 	running.State = JobRunning
+	running.HasWorkerResult, running.Output, running.Error = false, "", ""
 	assertWorkerFailureSaves(t, store, []JobRecord{record, running, want})
 	alive, exists, order := coordinatorWorkerSnapshot(s, worker.ID)
 	if !exists || alive.Status != WorkerAlive || alive.Address != worker.Address ||

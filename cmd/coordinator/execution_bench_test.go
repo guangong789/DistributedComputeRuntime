@@ -38,8 +38,8 @@ const (
 )
 
 // This fixture uses production Coordinator transport, admission, execution and
-// P1 cleanup. No liveness/recovery loops or heartbeat producer are started: this
-// is a healthy single-endpoint request baseline, not a process/recovery test.
+// P1 cleanup. The production scheduler is process-owned; no liveness monitor or
+// heartbeat producer runs in this healthy-endpoint benchmark.
 // The Worker uses production rpcauth authorization and the existing real Task /
 // Runtime handler, not cmd/worker.WorkerService or its lifecycle/logging wrapper.
 type submitBenchmarkFixture struct {
@@ -112,8 +112,13 @@ func newConfiguredSubmitBenchmarkFixture(b testing.TB, cfg submitBenchmarkConfig
 	if err != nil {
 		b.Fatal(err)
 	}
+	// Async discovery, publication and observation now overlap. A single pool
+	// connection keeps this execution experiment from injecting SQLite BUSY via
+	// its own polling. Report this benchmark-only policy; do not tune pragmas or
+	// retry read errors. These results establish a new async baseline.
+	f.store.db.SetMaxOpenConns(1)
 	s := &CoordinatorServer{jobStore: f.store, metrics: coordinatorMetrics, preimageVerifier: crypto.verifier,
-		workerCredentials: transport.workerCredentials, leaseDuration: submitBenchLease}
+		workerCredentials: transport.workerCredentials, leaseDuration: submitBenchLease, recoveryReady: make(chan struct{}, 1)}
 	f.process = newCoordinatorProcess(s, submitBenchCleanup)
 	f.process.closeStore = func() error {
 		var auditErr error
@@ -271,26 +276,49 @@ func newConfiguredSubmitBenchmarkFixture(b testing.TB, cfg submitBenchmarkConfig
 	if err != nil || databasePath == "" || !info.Mode().IsRegular() {
 		b.Fatal("SQLite fixture is not a regular file-backed database")
 	}
-	f.sqlite = map[string]any{"file_backed": true, "file_mode": info.Mode().String(), "journal_mode": journal, "synchronous": synchronous}
+	f.sqlite = map[string]any{"file_backed": true, "file_mode": info.Mode().String(), "journal_mode": journal, "synchronous": synchronous, "max_open_connections": f.store.db.Stats().MaxOpenConnections}
+	// Register the one producer before returning the fixture or permitting shutdown.
+	f.process.background.Add(1)
+	go func() { defer f.process.background.Done(); s.runRecoveryLoop(s.lifecycle.ctx) }()
 	return f
 }
 
 // Identity fields are attached outside the timed path. Flattened JSON/CSV rows
 // must retain (run_id, invocation, cohort, job_id); job_id alone is fixture-local.
 type submitBenchmarkSample struct {
-	RunID           string `json:"run_id"`
-	Invocation      string `json:"invocation"`
-	Cohort          string `json:"cohort"`
-	Iteration       int    `json:"iteration"`
-	JobID           int64  `json:"job_id"`
-	AttemptID       int64  `json:"attempt_id"`
-	RPCNanoseconds  int64  `json:"rpc_ns"`
-	RPCCode         string `json:"rpc_code"`
-	ResponseState   string `json:"response_state"`
-	DurableState    string `json:"durable_state"`
-	DurableAttempt  int64  `json:"durable_attempt_id"`
-	MultipleAttempt bool   `json:"multiple_attempts"`
-	Failure         string `json:"failure,omitempty"`
+	RunID                 string `json:"run_id"`
+	Invocation            string `json:"invocation"`
+	Cohort                string `json:"cohort"`
+	Iteration             int    `json:"iteration"`
+	JobID                 int64  `json:"job_id"`
+	AdmissionAccepted     bool   `json:"admission_accepted"`
+	AdmissionAttemptID    int64  `json:"admission_attempt_id"`
+	SubmissionNS          int64  `json:"submission_ns_from_fixture"`
+	AcknowledgementNS     int64  `json:"acknowledgement_ns_from_fixture"`
+	TerminalNS            int64  `json:"terminal_ns_from_fixture"`
+	RPCNanoseconds        int64  `json:"rpc_ns"` // Admission RPC only, semantics version 2.
+	CompletionNanoseconds int64  `json:"completion_ns"`
+	RPCCode               string `json:"rpc_code"`
+	ResponseState         string `json:"response_state"` // Admission acknowledgement, not Job outcome.
+	Polls                 int    `json:"get_job_polls"`
+	AdmissionError        string `json:"admission_error,omitempty"`
+	ObservationError      string `json:"observation_error,omitempty"`
+	TerminalError         string `json:"terminal_error,omitempty"` // Logical state; raw Error stays in snapshot.
+	Censored              bool   `json:"censored"`
+	TerminalState         string `json:"terminal_state"`
+	TerminalWorker        string `json:"terminal_worker"`
+	HasWorkerResult       bool   `json:"has_worker_result"`
+	TerminalHasOutput     bool   `json:"terminal_has_output"`
+	TerminalHasError      bool   `json:"terminal_has_error"`
+	AttemptID             int64  `json:"attempt_id"` // Observed terminal generation.
+	DurableState          string `json:"durable_state"`
+	DurableAttempt        int64  `json:"durable_attempt_id"`
+	DurableWorker         string `json:"durable_worker"`
+	AuditOK               bool   `json:"durable_audit_ok"`
+	MultipleAttempt       bool   `json:"multiple_attempts"`
+	Failure               string `json:"failure,omitempty"`
+	acknowledgement       *runtimepb.SubmitJobResponse
+	snapshot              *runtimepb.GetJobResponse // Preserve exact Output/Error without exporting proofs.
 }
 
 type submitBenchmarkMetric struct {
@@ -321,8 +349,8 @@ func submitBenchmarkMetrics(before, after integrationMetricsView) []submitBenchm
 // BenchmarkSubmitJobEndToEnd measures one sequential client's warm connection
 // over mTLS to the production Coordinator, real per-attempt mTLS dispatch, Task /
 // Runtime proving, Coordinator verification and SQLite terminal Save. Requests,
-// per-request contexts/cancel, RPC timestamping and light response checks are
-// timed. The independent post-response SQLite Load, metrics Gather and JSON
+// per-request contexts, admission and terminal GetJob observation are timed.
+// Polling is included. Independent proof/SQLite audits, quiescence, Gather and JSON
 // reporting are excluded. B/op is whole-process allocation during timed windows,
 // not just client allocation. All cohorts (including Go calibration) are printed
 // separately as P3B1_RESULT JSON with their own invocation ID and b.N. Warmup
@@ -336,41 +364,26 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 	f := newSubmitBenchmarkFixture(b)
 	samples := make([]submitBenchmarkSample, 0, b.N)
 	run := func(jobID int64) submitBenchmarkSample {
-		request := &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: f.payload, TimeoutMs: submitBenchTaskMs}
-		ctx, cancel := context.WithTimeout(f.ctx, submitBenchRPCBudget)
-		start := time.Now()
-		response, err := f.client.SubmitJob(ctx, request)
-		elapsed := time.Since(start)
-		cancel()
-		sample := submitBenchmarkSample{JobID: jobID, RPCNanoseconds: elapsed.Nanoseconds(), RPCCode: status.Code(err).String()}
-		if response != nil {
-			sample.AttemptID, sample.ResponseState = response.AttemptId, response.Status
-			sample.MultipleAttempt = response.AttemptId > 1
-		}
-		if err != nil || response == nil || response.JobId != jobID || response.AttemptId != 1 ||
-			response.Status != "Succeeded" || response.Error != "" || response.Output == "" {
-			sample.Failure = "rpc_or_response_validation"
+		sample := observeSubmitBenchmarkJob(f.ctx, f.client, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: f.payload, TimeoutMs: submitBenchTaskMs}, f.origin)
+		if sample.Failure == "" && (sample.TerminalState != "Succeeded" || !sample.HasWorkerResult || sample.TerminalWorker != submitBenchWorkerID || sample.AttemptID != 1 || !sample.TerminalHasOutput || sample.TerminalHasError) {
+			sample.Failure = "terminal_validation"
 		}
 		return sample
 	}
-	audit := func(sample *submitBenchmarkSample) {
-		record, ok, err := f.store.Load(sample.JobID)
-		if ok {
-			sample.DurableAttempt = record.AttemptID
-			sample.DurableState = fmt.Sprintf("JobState(%d)", record.State)
-			if record.State == JobSucceeded {
-				sample.DurableState = "Succeeded"
-			}
-		}
-		if err != nil || !ok || record != (JobRecord{JobID: sample.JobID, State: JobSucceeded, AttemptID: 1,
-			WorkerID: submitBenchWorkerID, TaskType: "zk_preimage_prove", Payload: f.payload, TimeoutMs: submitBenchTaskMs}) {
-			sample.Failure = "durable_state_audit"
-		}
+	settle := func() error {
+		ctx, cancel := context.WithTimeout(f.ctx, submitBenchRPCBudget)
+		defer cancel()
+		return f.waitIdle(ctx)
 	}
 	warmupSamples := make([]submitBenchmarkSample, 0, submitBenchWarmup)
 	for id := int64(1); id <= submitBenchWarmup; id++ {
 		sample := run(id)
-		audit(&sample)
+		if err := settle(); err != nil {
+			b.Fatal("warmup quiescence: ", err)
+		}
+		if err := f.auditSample(&sample); err != nil && sample.Failure == "" {
+			sample.Failure = "durable_state_audit"
+		}
 		identifySubmitBenchmarkSample(&sample, invocation, "warmup", int(id))
 		warmupSamples = append(warmupSamples, sample)
 		if sample.Failure != "" {
@@ -380,38 +393,55 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 	coordinatorBefore := gatherIntegrationMetrics(b, f.coordinatorRegistry)
 	workerBefore := gatherIntegrationMetrics(b, f.workers[0].registry)
 	callsBefore, busyBefore := f.workers[0].calls.Load(), f.workers[0].busy.Load()
-	observationStart := time.Now()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StartTimer()
 		sample := run(int64(submitBenchWarmup + 1 + i))
 		b.StopTimer()
-		audit(&sample)
 		identifySubmitBenchmarkSample(&sample, invocation, "measured", i+1)
 		samples = append(samples, sample)
 		if sample.Failure != "" {
 			break // Keep and publish the failed sample; never report a valid cohort.
 		}
 	}
-	observationElapsed := time.Since(observationStart)
+	idleErr := settle()
+	// All independent audits follow the last timed workflow, so they cannot
+	// inflate the submission-to-terminal cohort window between sequential jobs.
+	var firstSubmission, lastTerminal int64
+	for i := range samples {
+		if firstSubmission == 0 {
+			firstSubmission = samples[i].SubmissionNS
+		}
+		if samples[i].TerminalNS > lastTerminal {
+			lastTerminal = samples[i].TerminalNS
+		}
+		if err := f.auditSample(&samples[i]); err != nil && samples[i].Failure == "" {
+			samples[i].Failure = "durable_state_audit"
+		}
+	}
+	observationNS := int64(0)
+	if lastTerminal > firstSubmission {
+		observationNS = lastTerminal - firstSubmission
+	}
 	coordinatorAfter := gatherIntegrationMetrics(b, f.coordinatorRegistry)
 	workerAfter := gatherIntegrationMetrics(b, f.workers[0].registry)
 	failed := 0
 	cancelled := 0
-	var rpcNanoseconds int64
+	var rpcNanoseconds, completionNanoseconds int64
 	for _, sample := range samples {
 		rpcNanoseconds += sample.RPCNanoseconds
+		completionNanoseconds += sample.CompletionNanoseconds
 		if sample.Failure != "" {
 			failed++
 		}
-		if sample.RPCCode == codes.Canceled.String() || sample.RPCCode == codes.DeadlineExceeded.String() || sample.ResponseState == "Cancelled" {
+		if sample.TerminalState == "Cancelled" {
 			cancelled++
 		}
 	}
 	// The no-fault baseline must have exactly one published/accepted/verified
 	// attempt per job. Counters and histograms exclude all three warmup jobs.
-	accountingOK := len(samples) == b.N && failed == 0 && int(f.workers[0].calls.Load()-callsBefore) == b.N && f.workers[0].busy.Load()-busyBefore == 0
+	accountingOK := idleErr == nil && len(samples) == b.N && failed == 0 && int(f.workers[0].calls.Load()-callsBefore) == b.N && f.workers[0].busy.Load()-busyBefore == 0
 	source := map[string]string{"source": "submit"}
 	for _, name := range []string{"dzkr_jobs_submitted_total", "dzkr_attempts_started_total"} {
 		accountingOK = accountingOK && coordinatorAfter.sample(name, source).value-coordinatorBefore.sample(name, source).value == float64(b.N)
@@ -446,7 +476,19 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 	accepted := map[string]string{"source": "submit", "outcome": "accepted"}
 	accountingOK = accountingOK && coordinatorAfter.sample("dzkr_attempt_duration_seconds", accepted).count-coordinatorBefore.sample("dzkr_attempt_duration_seconds", accepted).count == uint64(b.N)
 	accountingOK = accountingOK && workerAfter.sample("dzkr_zk_proving_duration_seconds", nil).count-workerBefore.sample("dzkr_zk_proving_duration_seconds", nil).count == uint64(b.N)
+	admissionLabels := map[string]string{"outcome": "accepted"}
+	accountingOK = accountingOK && coordinatorAfter.sample("dzkr_job_admission_duration_seconds", admissionLabels).count-coordinatorBefore.sample("dzkr_job_admission_duration_seconds", admissionLabels).count == uint64(b.N)
+	cleanupErr := f.finish()
+	var throughput *float64
+	if accountingOK && cleanupErr == nil {
+		throughput = capacityRatio(float64(len(samples)-failed), float64(observationNS)/1e9)
+	}
 	report := struct {
+		SemanticsVersion   int                     `json:"measurement_semantics_version"`
+		Valid              bool                    `json:"valid"`
+		Cleanup            capacityCleanup         `json:"cleanup"`
+		CompletionSumNS    int64                   `json:"completion_sum_ns"`
+		Throughput         *float64                `json:"successful_jobs_per_second"`
 		RunID              string                  `json:"run_id"`
 		Invocation         string                  `json:"invocation"`
 		Iterations         int                     `json:"iterations"`
@@ -455,8 +497,8 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 		Failed             int                     `json:"failed"`
 		Cancelled          int                     `json:"cancelled_subset"`
 		AccountingOK       bool                    `json:"accounting_ok"`
-		RPCSumNS           int64                   `json:"rpc_sum_ns"`
-		ObservationNS      int64                   `json:"observation_ns_including_audits"`
+		RPCSumNS           int64                   `json:"admission_rpc_sum_ns"`
+		ObservationNS      int64                   `json:"cohort_window_ns"`
 		NumCPU             int                     `json:"num_cpu"`
 		GOMAXPROCS         int                     `json:"gomaxprocs"`
 		SQLite             map[string]any          `json:"sqlite"`
@@ -468,15 +510,16 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 		CoordinatorMetrics []submitBenchmarkMetric `json:"coordinator_metrics_delta"`
 		WorkerMetrics      []submitBenchmarkMetric `json:"worker_metrics_delta"`
 	}{
+		SemanticsVersion: submitBenchSemanticsVersion, Valid: accountingOK && cleanupErr == nil, Cleanup: f.cleanup, CompletionSumNS: completionNanoseconds, Throughput: throughput,
 		RunID: submitBenchmarkRunID, Invocation: invocation, Iterations: b.N, Warmup: submitBenchWarmup,
-		Succeeded: len(samples) - failed, Failed: failed, Cancelled: cancelled, AccountingOK: accountingOK, RPCSumNS: rpcNanoseconds, ObservationNS: observationElapsed.Nanoseconds(),
+		Succeeded: len(samples) - failed, Failed: failed, Cancelled: cancelled, AccountingOK: accountingOK, RPCSumNS: rpcNanoseconds, ObservationNS: observationNS,
 		NumCPU: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0), SQLite: f.sqlite,
 		Configuration: map[string]any{"workers": 1, "clients": 1, "proving_capacity": 1, "worker_timeout_ms": submitBenchTaskMs,
 			"lease_seconds": submitBenchLease.Seconds(), "rpc_deadline_seconds": submitBenchRPCBudget.Seconds(),
 			"startup_readiness_seconds": submitBenchSetup.Seconds(), "cleanup_seconds_per_stage": submitBenchCleanup.Seconds(),
 			"worker_graceful_cleanup_seconds": (submitBenchCleanup / 2).Seconds(),
 			"metrics":                         "separate production Prometheus registries; no HTTP exporter", "client_connection": "warm",
-			"dispatch_connection": "new per attempt", "heartbeat_and_recovery_loops": false, "production_worker_service": false},
+			"dispatch_connection": "new per attempt", "scheduler_loop": true, "liveness_and_heartbeat": false, "queued_session_limit": defaultQueuedSessionLimit, "poll_interval_ns": submitBenchPollInterval.Nanoseconds(), "rpc_ns_semantics": "admission_only", "baseline_compatibility": "new_async_baseline", "production_worker_service": false},
 		WorkerCalls: f.workers[0].calls.Load() - callsBefore, Busy: f.workers[0].busy.Load() - busyBefore, WarmupSamples: warmupSamples, Samples: samples,
 		CoordinatorMetrics: submitBenchmarkMetrics(coordinatorBefore, coordinatorAfter), WorkerMetrics: submitBenchmarkMetrics(workerBefore, workerAfter),
 	}
@@ -485,7 +528,7 @@ func BenchmarkSubmitJobEndToEnd(b *testing.B) {
 		b.Fatal(err)
 	}
 	fmt.Printf("P3B1_RESULT %s\n", encoded) // No payloads, witnesses, proofs or raw errors.
-	if !accountingOK {
+	if !report.Valid {
 		b.Fatal("P3-B1 outcome/accounting mismatch; inspect the retained P3B1_RESULT cohort")
 	}
 }

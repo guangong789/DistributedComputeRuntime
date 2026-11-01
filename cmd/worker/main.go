@@ -40,12 +40,10 @@ type WorkerService struct {
 	metrics metrics.Metrics
 }
 
-func buildTask(
-	taskType string,
-	payload string,
-	preimageProver *zk.PreimageProver,
-	witnessStore runtime.WitnessStore,
-) (runtime.Task, error) {
+var errMissingProvingLimiter = errors.New("proving limiter is not configured")
+
+// buildTask supplies all Worker dependencies before returning an executable task.
+func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error) {
 	switch taskType {
 	case "hash":
 		return runtime.HashTask{
@@ -63,18 +61,24 @@ func buildTask(
 		}, nil
 
 	case "zk_preimage_prove":
-		if preimageProver == nil {
+		if s.preimageProver == nil {
 			return nil, fmt.Errorf("preimage prover is not configured")
 		}
 
-		if witnessStore == nil {
+		if s.witnessStore == nil {
 			return nil, fmt.Errorf("witness store is not configured")
+		}
+
+		if s.provingLimiter == nil {
+			return nil, errMissingProvingLimiter
 		}
 
 		return runtime.ZKPreimageTask{
 			Payload:      payload,
-			Prover:       preimageProver,
-			WitnessStore: witnessStore,
+			Prover:       s.preimageProver,
+			WitnessStore: s.witnessStore,
+			Limiter:      s.provingLimiter,
+			Metrics:      metrics.Resolve(s.metrics),
 		}, nil
 
 	default:
@@ -104,13 +108,11 @@ func (s *WorkerService) ExecuteJob(
 			Error: "ZK tasks are disabled",
 		}, nil
 	}
-	task, err := buildTask(
-		req.TaskType,
-		req.Payload,
-		s.preimageProver,
-		s.witnessStore,
-	)
+	task, err := s.buildTask(req.TaskType, req.Payload)
 	if err != nil {
+		if errors.Is(err, errMissingProvingLimiter) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 		return &runtimepb.ExecuteJobResponse{
 			JobId:     req.JobId,
 			AttemptId: req.AttemptId,
@@ -118,15 +120,6 @@ func (s *WorkerService) ExecuteJob(
 			Output:    "",
 			Error:     err.Error(),
 		}, nil
-	}
-
-	if preimageTask, ok := task.(runtime.ZKPreimageTask); ok {
-		if s.provingLimiter == nil {
-			return nil, status.Error(codes.FailedPrecondition, "proving limiter is not configured")
-		}
-		preimageTask.Limiter = s.provingLimiter
-		preimageTask.Metrics = metrics.Resolve(s.metrics)
-		task = preimageTask
 	}
 
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)

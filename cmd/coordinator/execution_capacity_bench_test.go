@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
-	"google.golang.org/grpc/status"
 )
 
 const capacityWarmup = 6
@@ -31,39 +31,28 @@ type capacitySample struct {
 	Issued            bool   `json:"issued"`
 	StartNS           int64  `json:"start_ns"`
 	EndNS             int64  `json:"end_ns"`
-	Censored          bool   `json:"censored"`
 	ResponseJobID     int64  `json:"response_job_id"`
 	ResponseHasOutput bool   `json:"response_has_output"`
 	ResponseHasError  bool   `json:"response_has_error"`
-	DurableWorker     string `json:"durable_worker"`
 	SpecMatches       bool   `json:"durable_spec_matches"`
 }
 
 // The same Ready ClientConn is shared by bounded logical clients. Only actual
 // SubmitJob is inside rpc_ns; atomics for partial-run diagnostics precede it.
 func runCapacityRequest(f *submitBenchmarkFixture, invocation, config, cohort string, client, iteration int, jobID int64, origin time.Time, slots ...*capacitySlot) capacitySample {
-	request := &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: f.payload, TimeoutMs: submitBenchTaskMs}
-	ctx, cancel := context.WithTimeout(f.ctx, submitBenchRPCBudget)
-	defer cancel()
 	if len(slots) > 0 {
 		slots[0].startNS.Store(time.Since(origin).Nanoseconds())
 		slots[0].issued.Store(true)
 	}
-	start := time.Now()
-	response, err := f.client.SubmitJob(ctx, request)
-	end := time.Now()
-	sample := capacitySample{Config: config, Client: client, Issued: true, StartNS: start.Sub(origin).Nanoseconds(), EndNS: end.Sub(origin).Nanoseconds()}
-	sample.JobID = jobID
-	sample.RPCNanoseconds = end.Sub(start).Nanoseconds()
-	sample.RPCCode = status.Code(err).String()
+	observed := observeSubmitBenchmarkJob(f.ctx, f.client, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: f.payload, TimeoutMs: submitBenchTaskMs}, f.origin)
+	sample := capacitySample{submitBenchmarkSample: observed, Config: config, Client: client, Issued: true,
+		StartNS: observed.SubmissionNS - origin.Sub(f.origin).Nanoseconds()}
+	if observed.TerminalNS > 0 {
+		sample.EndNS = observed.TerminalNS - origin.Sub(f.origin).Nanoseconds()
+	}
 	identifySubmitBenchmarkSample(&sample.submitBenchmarkSample, invocation, cohort, iteration)
-	if response != nil {
-		sample.AttemptID = response.AttemptId
-		sample.ResponseJobID = response.JobId
-		sample.ResponseState = response.Status
-		sample.MultipleAttempt = response.AttemptId > 1
-		sample.ResponseHasOutput = response.Output != ""
-		sample.ResponseHasError = response.Error != ""
+	if ack := observed.acknowledgement; ack != nil {
+		sample.ResponseJobID, sample.ResponseHasOutput, sample.ResponseHasError = ack.JobId, ack.Output != "", ack.Error != ""
 	}
 	return sample
 }
@@ -91,40 +80,54 @@ type capacityDurable struct {
 	state, worker string
 	attempt       int64
 	specMatches   bool
+	auditOK       bool
 }
 
 func auditCapacityJobs(f *submitBenchmarkFixture, samples []capacitySample) ([]capacityDurable, error) {
 	rows := make([]capacityDurable, 0, len(samples))
+	seen := make(map[int64]bool, len(samples))
+	var auditErr error
 	for _, sample := range samples {
-		record, ok, err := f.store.Load(sample.JobID)
-		if err != nil {
-			return rows, fmt.Errorf("SQLite audit failed for job %d", sample.JobID)
+		if seen[sample.JobID] {
+			return rows, fmt.Errorf("duplicate audit job %d", sample.JobID)
 		}
-		row := capacityDurable{jobID: sample.JobID, state: "Missing"}
-		if ok {
-			row.state, row.worker, row.attempt = capacityState(record.State), record.WorkerID, record.AttemptID
-			workerKnown := false
-			for _, w := range f.workers {
-				workerKnown = workerKnown || w.id == record.WorkerID
-			}
-			row.specMatches = record.JobID == sample.JobID && record.TaskType == "zk_preimage_prove" && record.Payload == f.payload && record.TimeoutMs == submitBenchTaskMs && workerKnown
+		seen[sample.JobID] = true
+		err := f.auditSample(&sample.submitBenchmarkSample)
+		row := capacityDurable{jobID: sample.JobID, state: sample.DurableState, worker: sample.DurableWorker,
+			attempt: sample.DurableAttempt, specMatches: sample.AuditOK, auditOK: sample.AuditOK}
+		if row.state == "" {
+			row.state = "Missing"
 		}
 		rows = append(rows, row)
+		if err != nil {
+			auditErr = errors.Join(auditErr, err)
+		}
 	}
-	return rows, nil
+	return rows, auditErr
 }
-func applyCapacityAudit(samples []capacitySample, rows []capacityDurable) {
+func applyCapacityAudit(samples []capacitySample, rows []capacityDurable) error {
 	byID := make(map[int64]capacityDurable, len(rows))
+	wanted := make(map[int64]bool, len(samples))
+	for _, s := range samples {
+		if wanted[s.JobID] {
+			return fmt.Errorf("duplicate sample job %d", s.JobID)
+		}
+		wanted[s.JobID] = true
+	}
 	for _, r := range rows {
+		if _, duplicate := byID[r.jobID]; duplicate || !wanted[r.jobID] {
+			return fmt.Errorf("duplicate/unexpected audit job %d", r.jobID)
+		}
 		byID[r.jobID] = r
 	}
 	for i := range samples {
 		r, ok := byID[samples[i].JobID]
 		if !ok {
-			r.state = "Missing"
+			return fmt.Errorf("missing audit job %d", samples[i].JobID)
 		}
-		samples[i].DurableState, samples[i].DurableAttempt, samples[i].DurableWorker, samples[i].SpecMatches = r.state, r.attempt, r.worker, r.specMatches
+		samples[i].DurableState, samples[i].DurableAttempt, samples[i].DurableWorker, samples[i].SpecMatches, samples[i].AuditOK = r.state, r.attempt, r.worker, r.specMatches, r.auditOK
 	}
+	return nil
 }
 
 type capacityWorkerReport struct {
@@ -139,6 +142,9 @@ type capacityWorkerReport struct {
 	Metrics      []submitBenchmarkMetric `json:"metrics_delta"`
 }
 type capacityReport struct {
+	SemanticsVersion   int                     `json:"measurement_semantics_version"`
+	Completed          int                     `json:"observed_terminal_jobs"`
+	SampleError        string                  `json:"sample_error,omitempty"`
 	ExpectedOutcomes   bool                    `json:"expected_capacity_outcomes"`
 	Rejected           float64                 `json:"rejected_attempts"`
 	IntervalPeak       int                     `json:"prove_interval_peak"`
@@ -183,6 +189,33 @@ func capacityRatio(numerator, denominator float64) *float64 {
 	return &value
 }
 
+func collectCapacitySample(rows map[int64]capacitySample, s capacitySample, invocation, config string, iterations, clients int) error {
+	if _, duplicate := rows[s.JobID]; duplicate || s.RunID != submitBenchmarkRunID || s.Invocation != invocation || s.Config != config || s.Cohort != "measured" || s.Iteration < 1 || s.Iteration > iterations || s.JobID != int64(capacityWarmup+s.Iteration) || s.Client != (s.Iteration-1)%clients {
+		return fmt.Errorf("duplicate/unexpected sample job %d", s.JobID)
+	}
+	rows[s.JobID] = s
+	return nil
+}
+
+func capacityObservationWindow(samples []capacitySample) (int64, error) {
+	if len(samples) == 0 {
+		return 0, fmt.Errorf("empty cohort")
+	}
+	first, last := samples[0].StartNS, int64(0)
+	for _, s := range samples {
+		if s.Censored || s.TerminalNS == 0 || s.EndNS <= s.StartNS {
+			return 0, fmt.Errorf("unobserved completion for job %d", s.JobID)
+		}
+		if s.StartNS < first {
+			first = s.StartNS
+		}
+		if s.EndNS > last {
+			last = s.EndNS
+		}
+	}
+	return last - first, nil
+}
+
 // Each selected child owns its fixture. Example exact selection:
 // -bench '^BenchmarkSubmitJobCapacity$/^C$'. DZKR_BENCH_PREIMAGE_DIR is an explicit
 // test-only opt-in, containing one externally prepared matching key pair.
@@ -203,16 +236,19 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 			}
 			f := newConfiguredSubmitBenchmarkFixture(b, submitBenchmarkConfig{workers: cfg.workers, capacity: cfg.capacity, keyDir: dir, track: true})
 			invocation := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
-			report := capacityReport{RunID: submitBenchmarkRunID, Invocation: invocation, Config: cfg.id, Iterations: b.N,
+			report := capacityReport{SemanticsVersion: submitBenchSemanticsVersion, RunID: submitBenchmarkRunID, Invocation: invocation, Config: cfg.id, Iterations: b.N,
 				WarmupCalls: make(map[string]int32), RPCStatus: make(map[string]int), Durable: make(map[string]int), KeyHashes: f.keyHashes, SQLite: f.sqlite}
 			for id := int64(1); id <= capacityWarmup; id++ {
 				sample := runCapacityRequest(f, invocation, cfg.id, "warmup", 0, int(id), id, f.origin)
+				idleCtx, stopIdle := context.WithTimeout(f.ctx, submitBenchRPCBudget)
+				idleErr := f.waitIdle(idleCtx)
+				stopIdle()
 				audited, err := auditCapacityJobs(f, []capacitySample{sample})
 				one := []capacitySample{sample}
-				applyCapacityAudit(one, audited)
+				applyErr := applyCapacityAudit(one, audited)
 				sample = one[0]
 				report.Warmup = append(report.Warmup, sample)
-				if err != nil || sample.RPCCode != "OK" || sample.ResponseState != "Succeeded" || sample.DurableState != "Succeeded" || !sample.SpecMatches || sample.AttemptID != 1 {
+				if idleErr != nil || err != nil || applyErr != nil || sample.RPCCode != "OK" || sample.ResponseState != "Accepted" || sample.TerminalState != "Succeeded" || !sample.HasWorkerResult || sample.DurableState != "Succeeded" || !sample.SpecMatches || sample.AttemptID != 1 {
 					b.Fatal("capacity warmup failed; inspect RPC/SQLite diagnostics")
 				}
 			}
@@ -250,6 +286,9 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 						}
 						row := runCapacityRequest(f, invocation, cfg.id, "measured", client, index+1, int64(capacityWarmup+index+1), cohortStart, &slots[index])
 						results <- row // Sized for every possible issued job; never waits on collector.
+						if row.snapshot == nil {
+							return
+						} // An unresolved Job still occupies this logical client.
 					}
 				}()
 			}
@@ -303,7 +342,9 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 			for {
 				select {
 				case row := <-results:
-					collected[row.JobID] = row
+					if err := collectCapacitySample(collected, row, invocation, cfg.id, b.N, cfg.clients); err != nil {
+						report.SampleError = err.Error()
+					}
 				default:
 					break drainResults
 				}
@@ -315,8 +356,8 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 				id := int64(capacityWarmup + i + 1)
 				row, ok := collected[id]
 				if !ok {
-					row = capacitySample{Config: cfg.id, Client: i % cfg.clients, Issued: true, Censored: true, StartNS: slots[i].startNS.Load()}
-					row.JobID = id
+					row = capacitySample{Config: cfg.id, Client: i % cfg.clients, Issued: true, StartNS: slots[i].startNS.Load()}
+					row.JobID, row.Censored = id, true
 					row.RPCCode = "Unresolved"
 					identifySubmitBenchmarkSample(&row.submitBenchmarkSample, invocation, "measured", i+1)
 				}
@@ -326,6 +367,24 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 				}
 			}
 			report.Issued = len(report.Samples)
+			if !report.Watchdog {
+				if window, err := capacityObservationWindow(report.Samples); err == nil {
+					report.ObservationNS = window
+					first := report.Samples[0].StartNS
+					for _, row := range report.Samples {
+						if row.StartNS < first {
+							first = row.StartNS
+						}
+					}
+					report.CohortStartNS += first
+				} else {
+					report.SampleError = err.Error()
+				}
+			}
+			idleCtx, stopIdle := context.WithTimeout(f.ctx, submitBenchRPCBudget)
+			idleErr := f.waitIdle(idleCtx)
+			stopIdle()
+
 			auditResult := make(chan []capacityDurable, 1)
 			auditSamples := append([]capacitySample(nil), report.Samples...)
 			// P1 invokes this only after admitted handlers and dispatch have joined,
@@ -335,7 +394,9 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 			report.Cleanup = f.cleanup
 			select {
 			case rows := <-auditResult:
-				applyCapacityAudit(report.Samples, rows)
+				if err := applyCapacityAudit(report.Samples, rows); err != nil {
+					report.SampleError = err.Error()
+				}
 			default:
 			}
 			coAfter := gatherIntegrationMetrics(b, f.coordinatorRegistry)
@@ -349,13 +410,15 @@ func BenchmarkSubmitJobCapacity(b *testing.B) {
 				report.Busy += wr.Busy
 			}
 			report.Proofs = f.proofs.snapshot()
-			report.Configuration = map[string]any{"workers": cfg.workers, "capacity_per_worker": cfg.capacity, "clients": cfg.clients, "client_connection": "one shared Ready connection", "dispatch_connection": "new per attempt", "warmup": capacityWarmup, "timeout_ms": submitBenchTaskMs, "lease_seconds": submitBenchLease.Seconds(), "rpc_seconds": submitBenchRPCBudget.Seconds(), "cohort_watchdog_seconds": capacityCohortBudget.Seconds(), "worker_cleanup_shared_seconds": submitBenchCleanup.Seconds(), "coordinator_cleanup_seconds": submitBenchCleanup.Seconds(), "readiness_seconds": submitBenchSetup.Seconds(), "constraint_count": 331, "gomaxprocs": runtime.GOMAXPROCS(0), "num_cpu": runtime.NumCPU(), "go_version": runtime.Version(), "metrics": "separate Prometheus registries without HTTP exporter", "worker_boundary": "test endpoint; production Task/Runtime and rpcauth; no WorkerService/lifecycle/heartbeat", "recovery_liveness_loops": false, "resource_boundary": "all endpoints, Coordinator and clients share one Go process CPU/GC budget"}
+			report.Configuration = map[string]any{"workers": cfg.workers, "capacity_per_worker": cfg.capacity, "clients": cfg.clients, "client_connection": "one shared Ready connection", "dispatch_connection": "new per attempt", "warmup": capacityWarmup, "timeout_ms": submitBenchTaskMs, "lease_seconds": submitBenchLease.Seconds(), "rpc_seconds": submitBenchRPCBudget.Seconds(), "cohort_watchdog_seconds": capacityCohortBudget.Seconds(), "worker_cleanup_shared_seconds": submitBenchCleanup.Seconds(), "coordinator_cleanup_seconds": submitBenchCleanup.Seconds(), "readiness_seconds": submitBenchSetup.Seconds(), "constraint_count": 331, "gomaxprocs": runtime.GOMAXPROCS(0), "num_cpu": runtime.NumCPU(), "go_version": runtime.Version(), "metrics": "separate Prometheus registries without HTTP exporter", "worker_boundary": "test endpoint; production Task/Runtime and rpcauth; no WorkerService/lifecycle/heartbeat", "scheduler_loop": true, "liveness_and_heartbeat": false, "queued_session_limit": defaultQueuedSessionLimit, "poll_interval_ns": submitBenchPollInterval.Nanoseconds(), "rpc_ns_semantics": "admission_only", "baseline_compatibility": "new_async_baseline", "sample_start_end_origin": "client_barrier", "resource_boundary": "all endpoints, Coordinator and clients share one Go process CPU/GC budget"}
 			payloadHash := sha256.Sum256([]byte(f.payload))
 			report.Configuration["public_payload_sha256"] = fmt.Sprintf("%x", payloadHash)
 			finalizeCapacityAccounting(&report, coBefore, coAfter)
-			report.Valid = report.AccountingOK && cleanupErr == nil && report.ClientsJoined && !report.Watchdog
+			report.Valid = report.AccountingOK && idleErr == nil && cleanupErr == nil && report.ClientsJoined && !report.Watchdog && report.SampleError == ""
 			report.Comparable = report.Valid && report.ExpectedOutcomes && report.Proofs.AfterCancel == 0 && report.Rejected == 0
-			report.Throughput = capacityRatio(float64(report.Succeeded), float64(report.ObservationNS)/1e9)
+			if report.Valid {
+				report.Throughput = capacityRatio(float64(report.Succeeded), float64(report.ObservationNS)/1e9)
+			}
 			report.Amplification = capacityRatio(report.Attempts, float64(report.Issued))
 			report.BusyRate = capacityRatio(float64(report.Busy), float64(report.Calls))
 			encoded, err := json.Marshal(report)
@@ -377,7 +440,8 @@ func finalizeCapacityAccounting(r *capacityReport, before, after integrationMetr
 	}
 	r.IntervalPeak = capacityIntervalPeak(intervals)
 	r.ExpectedOutcomes = true
-	ok := r.Issued == r.Iterations && len(r.Samples) == r.Issued
+	ok := r.Issued == r.Iterations && len(r.Samples) == r.Issued && r.SampleError == ""
+	seen := make(map[int64]bool, len(r.Samples))
 	busyByJob := make(map[int64]int)
 	proveByJob := make(map[int64]int)
 	var calls, busy, proofs int64
@@ -413,24 +477,28 @@ func finalizeCapacityAccounting(r *capacityReport, before, after integrationMetr
 	for _, s := range r.Samples {
 		r.RPCStatus[s.RPCCode]++
 		r.Durable[s.DurableState]++
-		ok = ok && s.SpecMatches && !s.Censored && s.DurableAttempt >= 1 && s.DurableAttempt <= 2
+		identityOK := !seen[s.JobID] && s.Iteration >= 1 && s.Iteration <= r.Iterations && s.JobID == int64(capacityWarmup+s.Iteration) && s.RunID == r.RunID && s.Invocation == r.Invocation && s.Cohort == "measured" && s.Config == r.Config
+		seen[s.JobID] = true
+		observed := s.AdmissionAccepted && s.RPCCode == "OK" && s.ResponseState == "Accepted" && s.AdmissionAttemptID == 0 && s.ResponseJobID == s.JobID && !s.ResponseHasOutput && !s.ResponseHasError && s.ObservationError == "" && s.TerminalNS > s.SubmissionNS && s.AcknowledgementNS >= s.SubmissionNS && s.TerminalNS >= s.AcknowledgementNS && s.RPCNanoseconds == s.AcknowledgementNS-s.SubmissionNS && s.CompletionNanoseconds == s.TerminalNS-s.SubmissionNS && s.CompletionNanoseconds >= s.RPCNanoseconds && s.TerminalState == s.DurableState && s.AttemptID == s.DurableAttempt
+		ok = ok && identityOK && observed && s.SpecMatches && s.AuditOK && !s.Censored && s.DurableAttempt >= 1 && s.DurableAttempt <= 2
+		if identityOK && observed && s.AuditOK && !s.Censored && (s.TerminalState == "Succeeded" || s.TerminalState == "Failed" || s.TerminalState == "Cancelled") {
+			r.Completed++
+		}
 		switch s.DurableState {
 		case "Succeeded":
-			matched := s.RPCCode == "OK" && s.ResponseState == "Succeeded" && s.ResponseJobID == s.JobID && s.AttemptID == s.DurableAttempt && s.ResponseHasOutput && !s.ResponseHasError
+			matched := identityOK && observed && s.AuditOK && !s.Censored && s.HasWorkerResult && s.TerminalHasOutput && !s.TerminalHasError
 			if matched {
 				r.Succeeded++
 			}
 			ok = ok && matched && proveByJob[s.JobID] >= 1
 		case "Failed":
-			// Expected overload exhaustion is an RPC error plus durable Failed, not
-			// a harness failure. Do not infer this only from the top-level RPC code.
-			expectedBusy := s.RPCCode == "Unavailable" && busyByJob[s.JobID] == int(s.DurableAttempt) && proveByJob[s.JobID] == 0
-			taskFailed := s.RPCCode == "OK" && strings.EqualFold(s.ResponseState, "Failed") && s.AttemptID == s.DurableAttempt
-			ok = ok && (s.RPCCode == "Unavailable" || taskFailed)
+			// Admission succeeds even when background execution exhausts busy attempts.
+			expectedBusy := observed && !s.HasWorkerResult && busyByJob[s.JobID] == int(s.DurableAttempt) && proveByJob[s.JobID] == 0
+			ok = ok && observed
 			r.ExpectedOutcomes = r.ExpectedOutcomes && expectedBusy
 		case "Cancelled":
 			r.ExpectedOutcomes = false
-			ok = ok && s.RPCCode == "OK" && strings.EqualFold(s.ResponseState, "Cancelled") && s.AttemptID == s.DurableAttempt
+			ok = ok && observed
 		default:
 			ok = false
 		}
@@ -449,6 +517,10 @@ func finalizeCapacityAccounting(r *capacityReport, before, after integrationMetr
 	}
 	r.Rejected = rejected
 	ok = ok && finished == r.Attempts
+	ok = ok && r.Completed == r.Issued
+	admissionLabels := map[string]string{"outcome": "accepted"}
+	ok = ok && after.sample("dzkr_job_admission_duration_seconds", admissionLabels).count-before.sample("dzkr_job_admission_duration_seconds", admissionLabels).count == uint64(r.Issued)
+	ok = ok && after.sample("dzkr_job_execution_duration_seconds", source).count-before.sample("dzkr_job_execution_duration_seconds", source).count == uint64(r.Issued)
 	for _, state := range []string{"Succeeded", "Failed", "Cancelled"} {
 		labels := map[string]string{"source": "submit", "state": strings.ToLower(state)}
 		ok = ok && metricDelta("dzkr_jobs_terminal_total", labels) == float64(r.Durable[state])

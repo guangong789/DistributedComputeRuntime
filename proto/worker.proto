@@ -32,6 +32,9 @@ service CoordinatorService {
     rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
 
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+    // Read one persisted snapshot; does not submit or schedule the Job.
+    rpc GetJob(GetJobRequest) returns (GetJobResponse);
 }
 
 message RegisterWorkerRequest {
@@ -65,4 +68,33 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {
   bool accepted = 1;
+}
+
+// Wire states are independent of database state numbers. UNSPECIFIED is never
+// returned by a successful GetJob operation.
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_QUEUED = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_RECOVERING = 3;
+  JOB_STATE_SUCCEEDED = 4;
+  JOB_STATE_FAILED = 5;
+  JOB_STATE_CANCELLED = 6;
+}
+
+message GetJobRequest {
+  // Same opaque signed int64 identity as SubmitJob; zero and negative IDs are valid.
+  int64 job_id = 1;
+}
+
+message GetJobResponse {
+  int64 job_id = 1;
+  JobState state = 2;
+  int64 attempt_id = 3;
+  string worker_id = 4;
+  // Accepted Worker result presence, independent of empty output/error strings.
+  // False for legacy rows and Coordinator terminal decisions without a result.
+  bool has_worker_result = 5;
+  string output = 6;
+  string error = 7;
 }

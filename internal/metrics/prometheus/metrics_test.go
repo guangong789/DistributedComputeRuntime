@@ -130,6 +130,9 @@ func TestDurationHistogramsUseSecondsAndBuckets(t *testing.T) {
 	}{
 		{"dzkr_job_execution_duration_seconds", map[string]string{"source": "submit"},
 			func(d time.Duration) { backend.ObserveJobExecution(metrics.SourceSubmit, d) }},
+		{"dzkr_job_admission_duration_seconds", map[string]string{"outcome": "accepted"}, func(d time.Duration) { backend.ObserveJobAdmission(metrics.AdmissionAccepted, d) }},
+		{"dzkr_job_admission_duration_seconds", map[string]string{"outcome": "conflict"}, func(d time.Duration) { backend.ObserveJobAdmission(metrics.AdmissionConflict, d) }},
+		{"dzkr_job_admission_duration_seconds", map[string]string{"outcome": "store_error"}, func(d time.Duration) { backend.ObserveJobAdmission(metrics.AdmissionStoreError, d) }},
 		{"dzkr_attempt_duration_seconds", map[string]string{"source": "recovery", "outcome": "accepted"},
 			func(d time.Duration) { backend.AttemptFinished(metrics.SourceRecovery, metrics.AttemptAccepted, d) }},
 		{"dzkr_recovery_pass_duration_seconds", map[string]string{"outcome": "completed"},
@@ -203,6 +206,8 @@ func TestInvalidEnumsCannotCreateUnboundedLabels(t *testing.T) {
 	backend, registry := newTestBackend(t)
 	bad := "private-unbounded-value"
 	backend.JobSubmitted(metrics.ExecutionSource(bad))
+	backend.ObserveJobAdmission(metrics.AdmissionOutcome(bad), time.Second)
+	backend.ObserveJobAdmission(metrics.AdmissionAccepted, -time.Second)
 	backend.JobTerminal(metrics.SourceSubmit, metrics.TerminalState(bad))
 	backend.ObserveJobExecution(metrics.ExecutionSource(bad), time.Second)
 	backend.AttemptStarted(metrics.ExecutionSource(bad))

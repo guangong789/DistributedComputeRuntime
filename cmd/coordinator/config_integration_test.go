@@ -36,7 +36,7 @@ func TestConfiguredLeaseAllowsControlledProofOverMTLS(t *testing.T) {
 	address := startMTLSBackend(t, f, testpki.Worker,
 		controlledMTLSProvingWorker(fixture, prover, limiter, provingMetrics, nil))
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
-	client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
+	client := f.observingClient(t, testpki.Client)
 	parent, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	waitCtx, stopWaiting := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopWaiting()
@@ -47,7 +47,7 @@ func TestConfiguredLeaseAllowsControlledProofOverMTLS(t *testing.T) {
 	const jobID int64 = 11201
 	before := time.Now()
 	go func() {
-		response, err := client.SubmitJob(parent, &runtimepb.SubmitJobRequest{
+		response, err := submitAndObserveForTest(parent, client, &runtimepb.SubmitJobRequest{
 			JobId: jobID, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 40000,
 		})
 		done <- workerFailureResult{resp: response, err: err}
@@ -104,7 +104,8 @@ func TestConfiguredLeaseAllowsControlledProofOverMTLS(t *testing.T) {
 		TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 40000}
 	running := want
 	running.State = JobRunning
-	assertWorkerFailureSaves(t, f.store, []JobRecord{running, want})
+	want = withWorkerResult(want, result.resp.Output, result.resp.Error)
+	assertAdmittedWorkerFailureSaves(t, f.store, []JobRecord{running, want})
 	assertRecoveryRecord(t, f.store, want)
 	if f.observer.count("verification", "") != 1 || f.observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 || provingMetrics.samples.Load() != 1 {
 		t.Fatal("completion bypassed verification or duplicated success metrics")
@@ -132,7 +133,7 @@ func TestCoordinatorDefaultLeaseForDirectServices(t *testing.T) {
 		return successfulResult(r), nil
 	})
 	before := time.Now()
-	response, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{JobId: 11202, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+	response, err := s.executeSubmissionForTest(context.Background(), &runtimepb.SubmitJobRequest{JobId: 11202, TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
 	if err != nil || response.GetStatus() != "Succeeded" {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -61,19 +62,26 @@ func preimageTestPayload(t testing.TB, witnessRef string, digest fr.Element) str
 
 func TestBuildZKPreimageTaskRequiresDependencies(t *testing.T) {
 	const payload = `{"witness_ref":"secret-001","digest":"123"}`
-	prover, _ := newTestPreimageProver(t)
+	// Dependency validation must not need setup material or call Prove.
+	prover := &zk.PreimageProver{}
 	store := runtime.NewMemoryWitnessStore()
 
 	t.Run("missing prover", func(t *testing.T) {
-		task, err := buildTask("zk_preimage_prove", payload, nil, store)
+		task, err := (&WorkerService{witnessStore: store}).buildTask("zk_preimage_prove", payload)
 		if task != nil || err == nil || !strings.Contains(err.Error(), "preimage prover is not configured") {
 			t.Fatalf("expected missing-prover error, got task=%#v error=%v", task, err)
 		}
 	})
 	t.Run("missing witness store", func(t *testing.T) {
-		task, err := buildTask("zk_preimage_prove", payload, prover, nil)
+		task, err := (&WorkerService{preimageProver: prover}).buildTask("zk_preimage_prove", payload)
 		if task != nil || err == nil || !strings.Contains(err.Error(), "witness store is not configured") {
 			t.Fatalf("expected missing-store error, got task=%#v error=%v", task, err)
+		}
+	})
+	t.Run("missing limiter", func(t *testing.T) {
+		task, err := (&WorkerService{preimageProver: prover, witnessStore: store}).buildTask("zk_preimage_prove", payload)
+		if task != nil || !errors.Is(err, errMissingProvingLimiter) {
+			t.Fatalf("expected missing-limiter error, got task=%#v error=%v", task, err)
 		}
 	})
 }
@@ -85,7 +93,7 @@ func TestBuildZKPreimageTaskExecutesAndVerifies(t *testing.T) {
 	digest := zk.ComputePreimageDigest(42)
 	payload := preimageTestPayload(t, "secret-001", digest)
 
-	task, err := buildTask("zk_preimage_prove", payload, prover, store)
+	task, err := (&WorkerService{preimageProver: prover, witnessStore: store, provingLimiter: newTestProvingLimiter(t)}).buildTask("zk_preimage_prove", payload)
 	if err != nil {
 		t.Fatalf("build task: %v", err)
 	}
@@ -157,7 +165,7 @@ func TestBuildZKPreimageTaskWithLoadedWitnessFile(t *testing.T) {
 
 	digest := zk.ComputePreimageDigest(99)
 	payload := preimageTestPayload(t, "secret-002", digest)
-	task, err := buildTask("zk_preimage_prove", payload, prover, store)
+	task, err := (&WorkerService{preimageProver: prover, witnessStore: store, provingLimiter: newTestProvingLimiter(t)}).buildTask("zk_preimage_prove", payload)
 	if err != nil {
 		t.Fatalf("build task: %v", err)
 	}

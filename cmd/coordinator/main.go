@@ -35,6 +35,14 @@ type CoordinatorServer struct {
 	leases      map[int64]JobLease
 
 	activeJobs map[int64]struct{}
+	// Protected by mu. Explicit responsibility for unsettled internal queued
+	// sessions, consumed by the existing recovery loop. Pointer identity guards
+	// retirement against replacement; ordinary claims remain excluded.
+	queuedReconciliations map[int64]*queuedReconciliation
+	// Session capacity is separate from per-Job exclusion. Configure before
+	// startup; non-positive limits use defaultQueuedSessionLimit.
+	queuedSessionLimit int
+	queuedSessions     int // protected by mu, includes reserved/not-yet-launched work
 
 	// Set before serving requests; non-positive values use the 5-second default.
 	leaseDuration time.Duration
@@ -44,7 +52,7 @@ type CoordinatorServer struct {
 
 	jobStore  JobStore
 	lifecycle *coordinatorLifecycle
-	// Joined only after all admitted handlers and recovery producers have exited.
+	// Joined after admitted RPCs/internal sessions and recovery producers exit.
 	dispatchWG sync.WaitGroup
 	// Configure before serving. Worker readiness notifications coalesce.
 	recoveryReady chan struct{}
@@ -66,6 +74,9 @@ func (s *CoordinatorServer) SubmitJob(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "SubmitJob request is required")
+	}
 	if err := s.checkZKAvailable(req.TaskType); err != nil {
 		return nil, err
 	}
@@ -74,21 +85,60 @@ func (s *CoordinatorServer) SubmitJob(
 	if err != nil {
 		return nil, err
 	}
-	if !s.claimJob(req.JobId) {
-		return nil, status.Errorf(
-			codes.AlreadyExists,
-			"job %d is already being submitted",
-			req.JobId,
-		)
+	if s.jobStore == nil {
+		return nil, status.Error(codes.FailedPrecondition, errJobStoreNotConfigured.Error())
+	}
+	// Admitted duplicates need no execution claim, including during recovery or
+	// a blocked terminal write. Recheck after claiming to close the read/claim race.
+	if err := s.checkExistingSubmission(spec); err != nil {
+		return nil, status.Errorf(jobStoreErrorCode(err), "submit job %d: %v", req.JobId, err)
+	}
+	owned := s.claimJob(req.JobId)
+	admitted := false
+	if owned {
+		defer func() {
+			s.releaseJob(req.JobId)
+			if admitted {
+				s.notifyRecoveryReady()
+			}
+		}()
+	}
+	if err := s.checkExistingSubmission(spec); err != nil {
+		return nil, status.Errorf(jobStoreErrorCode(err), "submit job %d: %v", req.JobId, err)
+	}
+	if !owned {
+		return nil, status.Errorf(codes.Aborted, "job %d has a local session in progress; durable admission is not confirmed", req.JobId)
 	}
 
-	defer s.releaseJob(req.JobId)
-
-	observer := metrics.Resolve(s.metrics)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Create's confirmed success is durable admission. No Worker, generation,
+	// lease or execution context is allocated by this request.
+	queued := JobRecord{JobID: spec.JobID, State: JobQueued, TaskType: spec.TaskType,
+		Payload: spec.Payload, TimeoutMs: spec.TimeoutMs}
 	start := time.Now()
-	defer func() { observer.ObserveJobExecution(metrics.SourceSubmit, time.Since(start)) }()
+	created, err := s.jobStore.Create(queued)
+	observer := metrics.Resolve(s.metrics)
+	if err != nil {
+		observer.ObserveJobAdmission(metrics.AdmissionStoreError, time.Since(start))
+		// An error can hide a committed Queued row. Never delete, finalize,
+		// publish an Attempt or report Accepted based on an uncertain write.
+		return nil, status.Errorf(jobStoreErrorCode(err), "admit job %d: %v", spec.JobID, err)
+	}
+	if !created {
+		observer.ObserveJobAdmission(metrics.AdmissionConflict, time.Since(start))
+		if err := s.checkExistingSubmission(spec); err != nil {
+			return nil, status.Errorf(jobStoreErrorCode(err), "submit job %d: %v", spec.JobID, err)
+		}
+		return nil, status.Errorf(codes.Internal, "Create rejected job %d but durable admission could not be confirmed", spec.JobID)
+	}
+	admitted = true
+	observer.ObserveJobAdmission(metrics.AdmissionAccepted, time.Since(start))
 	observer.JobSubmitted(metrics.SourceSubmit)
-	return s.executeJob(ctx, spec)
+	// Confirmed admission wins cancellation during Create. The transport may
+	// still lose this response; GetJob observes the durable identity afterward.
+	return &runtimepb.SubmitJobResponse{JobId: spec.JobID, Status: "Accepted"}, nil
 }
 
 func main() {

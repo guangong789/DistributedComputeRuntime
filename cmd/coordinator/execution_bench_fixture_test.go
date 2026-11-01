@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"path/filepath"
@@ -14,13 +15,120 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
 	jobruntime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/zk"
+	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
 	"os"
 	"time"
 )
+
+const submitBenchPollInterval = time.Millisecond
+const submitBenchSemanticsVersion = 2
+
+// One admission and bounded terminal observation on the same authenticated client.
+// Errors are stage classifications; exact durable result strings remain in snapshot.
+func observeSubmitBenchmarkJob(ctx context.Context, client runtimepb.CoordinatorServiceClient, req *runtimepb.SubmitJobRequest, origin time.Time) submitBenchmarkSample {
+	s := submitBenchmarkSample{JobID: req.JobId}
+	rpcCtx, cancel := context.WithTimeout(ctx, submitBenchRPCBudget)
+	start := time.Now()
+	s.SubmissionNS = start.Sub(origin).Nanoseconds()
+	ack, err := client.SubmitJob(rpcCtx, req)
+	ackTime := time.Now()
+	cancel()
+	s.RPCNanoseconds = ackTime.Sub(start).Nanoseconds()
+	s.RPCCode, s.acknowledgement = status.Code(err).String(), ack
+	if ack != nil {
+		s.ResponseState, s.AdmissionAttemptID = ack.Status, ack.AttemptId
+	}
+	if err != nil {
+		s.AdmissionError, s.Failure = s.RPCCode, "admission_rpc"
+		return s
+	}
+	if err := jobobservation.ValidateAdmission(ack, req.JobId); err != nil {
+		s.AdmissionError, s.Failure = "invalid_acknowledgement", "admission_protocol"
+		return s
+	}
+	s.AdmissionAccepted, s.AcknowledgementNS = true, ackTime.Sub(origin).Nanoseconds()
+	observeCtx, stop := context.WithTimeout(ctx, submitBenchRPCBudget)
+	defer stop()
+	snapshot, err := jobobservation.Wait(observeCtx, req.JobId, submitBenchPollInterval, func(ctx context.Context, id int64) (*runtimepb.GetJobResponse, error) {
+		s.Polls++
+		readCtx, done := context.WithTimeout(ctx, submitBenchRPCBudget)
+		defer done()
+		return client.GetJob(readCtx, &runtimepb.GetJobRequest{JobId: id})
+	})
+	terminalTime := time.Now()
+	if err != nil {
+		s.ObservationError, s.Failure, s.Censored = status.Code(err).String(), "observation", true
+		return s
+	}
+	s.snapshot = snapshot
+	s.TerminalNS, s.CompletionNanoseconds = terminalTime.Sub(origin).Nanoseconds(), terminalTime.Sub(start).Nanoseconds()
+	s.TerminalState, s.TerminalWorker = jobobservation.StateName(snapshot.State), snapshot.WorkerId
+	s.AttemptID, s.MultipleAttempt = snapshot.AttemptId, snapshot.AttemptId > 1
+	s.HasWorkerResult, s.TerminalHasOutput, s.TerminalHasError = snapshot.HasWorkerResult, snapshot.Output != "", snapshot.Error != ""
+	if snapshot.State != runtimepb.JobState_JOB_STATE_SUCCEEDED {
+		s.TerminalError = s.TerminalState
+	}
+	return s
+}
+
+// Terminal Save can precede final metrics and ownership/capacity release.
+// Call outside measurement, before counter resets, audits or final snapshots.
+func (f *submitBenchmarkFixture) waitIdle(ctx context.Context) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s := f.process.service
+		s.mu.Lock()
+		idle := len(s.activeJobs) == 0 && s.queuedSessions == 0 && len(s.queuedReconciliations) == 0
+		s.mu.Unlock()
+		s.lifecycle.mu.Lock()
+		idle = idle && len(s.lifecycle.active) == 0
+		s.lifecycle.mu.Unlock()
+		if idle && f.proofs.snapshot().Active == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// Independently check persisted identity, exact result and the real proof.
+// This must run after terminal observation and outside benchmark timing.
+func (f *submitBenchmarkFixture) auditSample(s *submitBenchmarkSample) error {
+	s.AuditOK = false
+	r, found, err := f.store.Load(s.JobID)
+	if err != nil || !found {
+		return fmt.Errorf("missing/read-failed durable job %d", s.JobID)
+	}
+	s.DurableState, s.DurableAttempt, s.DurableWorker = capacityState(r.State), r.AttemptID, r.WorkerID
+	workerKnown := false
+	for _, w := range f.workers {
+		workerKnown = workerKnown || w.id == r.WorkerID
+	}
+	o := s.snapshot
+	if !s.AdmissionAccepted || o == nil || !workerKnown || r.JobID != s.JobID || r.TaskType != "zk_preimage_prove" || r.Payload != f.payload || r.TimeoutMs != submitBenchTaskMs ||
+		o.JobId != r.JobID || jobobservation.StateName(o.State) != capacityState(r.State) || o.AttemptId != r.AttemptID || o.WorkerId != r.WorkerID || o.HasWorkerResult != r.HasWorkerResult || o.Output != r.Output || o.Error != r.Error {
+		return fmt.Errorf("observed/durable mismatch for job %d", s.JobID)
+	}
+	if r.State == JobSucceeded {
+		proof, decodeErr := base64.StdEncoding.DecodeString(r.Output)
+		public, payloadErr := zk.ParsePreimagePublicPayload(f.payload)
+		if !r.HasWorkerResult || r.Error != "" || decodeErr != nil || len(proof) == 0 || payloadErr != nil || f.process.service.preimageVerifier.Verify(proof, public.Digest) != nil {
+			return fmt.Errorf("invalid durable proof for job %d", s.JobID)
+		}
+	}
+	s.AuditOK = true
+	return nil
+}
 
 // Process-local run identity; each Go calibration/final invocation also has its
 // own existing invocation ID and fresh database. Never aggregate by JobID alone.

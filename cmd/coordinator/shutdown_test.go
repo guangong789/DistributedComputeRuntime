@@ -21,17 +21,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Records real SQLite access and Close. Hooks block only the selected Save;
+// Records real SQLite access and Close. Hooks block the selected Create or Save;
 // instrumentation uses a separate lock from Coordinator.mu.
 type shutdownStore struct {
-	JobStore
+	JobStore     JobStore
 	mu           sync.Mutex
 	closed       bool
 	afterClose   int
 	events       []string
 	beforeSave   func(JobRecord)
+	beforeCreate func(JobRecord)
+	beforeQueued func(JobRecord)
 	closeBacking func() error
 }
+
+var _ JobStore = (*shutdownStore)(nil)
 
 func (s *shutdownStore) access(name string) {
 	s.mu.Lock()
@@ -56,6 +60,31 @@ func (s *shutdownStore) Save(record JobRecord) error {
 	}
 	return s.JobStore.Save(record)
 }
+func (s *shutdownStore) Create(record JobRecord) (bool, error) {
+	s.access("create")
+	if s.beforeCreate != nil {
+		s.beforeCreate(record)
+	}
+	return s.JobStore.Create(record)
+}
+func (s *shutdownStore) TryStartQueued(expected JobRecord, workerID string) (bool, error) {
+	s.access("start queued")
+	if s.beforeQueued != nil {
+		s.beforeQueued(expected)
+	}
+	return s.JobStore.TryStartQueued(expected, workerID)
+}
+func (s *shutdownStore) TryRecoverRunning(expected JobRecord) (bool, error) {
+	s.access("recover running")
+	// Preserve existing write barriers for the intended Recovering record,
+	// while intercepting the actual conditional operation rather than Save.
+	if s.beforeSave != nil {
+		repaired := expected
+		repaired.State = JobRecovering
+		s.beforeSave(repaired)
+	}
+	return s.JobStore.TryRecoverRunning(expected)
+}
 func (s *shutdownStore) Close() error {
 	s.mu.Lock()
 	s.closed = true
@@ -78,7 +107,12 @@ func shutdownFixture(t *testing.T, timeout time.Duration, beforeSave func(JobRec
 	if err := db.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
 		t.Fatal(err)
 	}
-	store := &shutdownStore{JobStore: f.store, beforeSave: beforeSave, closeBacking: db.Close}
+	store := &shutdownStore{JobStore: f.store, beforeSave: beforeSave, beforeCreate: beforeSave, closeBacking: db.Close}
+	if beforeSave != nil {
+		// Initial publication now uses TryStartQueued. Preserve the barrier
+		// on that actual operation instead of waiting for a retry's Save.
+		store.beforeQueued = func(r JobRecord) { r.State, r.AttemptID = JobRunning, 1; beforeSave(r) }
+	}
 	f.s.jobStore = store // Configure before starting any requests or recovery.
 	p := newCoordinatorProcess(f.s, timeout)
 	p.server, p.serveDone = f.server, f.serveDone
@@ -276,6 +310,9 @@ func TestCoordinatorShutdownActiveSubmitAndDispatch(t *testing.T) {
 		result <- err
 	}()
 	awaitShutdownSignal(t, started)
+	if err := <-result; err != nil {
+		t.Fatalf("confirmed admission failed before execution drained: %v", err)
+	}
 	shutdown := make(chan error, 1)
 	go func() { shutdown <- p.shutdown() }()
 	awaitShutdownSignal(t, dispatchEntered)
@@ -288,11 +325,8 @@ func TestCoordinatorShutdownActiveSubmitAndDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitShutdownSignal(t, returned)
-	if err := <-result; err == nil {
-		t.Fatal("shutdown reported successful RPC")
-	}
 	assertShutdownStoreClosed(t, store)
-	loadShutdownRecord(t, path, JobRecord{JobID: 9702, State: JobCancelled, AttemptID: 1, WorkerID: "worker-a", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+	loadShutdownRecord(t, path, JobRecord{JobID: 9702, State: JobRecovering, AttemptID: 1, WorkerID: "worker-a", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
 }
 
 func TestCoordinatorShutdownDuringSave(t *testing.T) {
@@ -337,7 +371,7 @@ func TestCoordinatorShutdownDuringSave(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-result
-			wantState, wantAttempt := JobCancelled, int64(1)
+			wantState, wantAttempt := JobRecovering, int64(1)
 			if state == JobFailed {
 				wantState, wantAttempt = JobFailed, 2
 				if calls.Load() != 2 {
@@ -351,9 +385,11 @@ func TestCoordinatorShutdownDuringSave(t *testing.T) {
 }
 
 func TestCoordinatorShutdownRecoveryRepair(t *testing.T) {
-	f, p, store, path := shutdownFixture(t, 2*time.Second, nil)
 	record := JobRecord{JobID: 9704, State: JobRecovering, AttemptID: 7, WorkerID: "old", TaskType: "hash", Payload: "recovery", TimeoutMs: 1000}
-	saveRecoveryRecord(t, store, record)
+	f, p, store, path := shutdownFixture(t, 2*time.Second, nil, func(f *mtlsCoordinator, _ *coordinatorProcess) {
+		// Finish seeding before the fixture starts background recovery.
+		saveRecoveryRecord(t, f.s.jobStore, record)
+	})
 	started := make(chan struct{})
 	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		if req.AttemptId != 8 {
@@ -399,7 +435,7 @@ func TestCoordinatorShutdownBeforeP0Finalization(t *testing.T) {
 	}
 	awaitShutdownSignal(t, finished)
 	assertShutdownStoreClosed(t, store)
-	loadShutdownRecord(t, path, JobRecord{JobID: 9707, State: JobCancelled, AttemptID: 2, WorkerID: "worker-a", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
+	loadShutdownRecord(t, path, JobRecord{JobID: 9707, State: JobRecovering, AttemptID: 2, WorkerID: "worker-a", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
 }
 
 func TestCoordinatorShutdownDuringVerification(t *testing.T) {
@@ -449,7 +485,7 @@ func TestCoordinatorShutdownDuringVerification(t *testing.T) {
 			}
 			awaitShutdownSignal(t, finished)
 			awaitShutdownSignal(t, p.cleanupDone)
-			want := preimageRecord(9706, 1, "worker-a", JobCancelled, payload)
+			want := preimageRecord(9706, 1, "worker-a", JobRecovering, payload)
 			if timeout {
 				if closed, after, _ := store.snapshot(); closed || after != 0 {
 					t.Fatal("timed-out shutdown resumed cleanup")
@@ -486,7 +522,7 @@ func TestCoordinatorShutdownCleanupUsesOverallBudget(t *testing.T) {
 }
 
 func TestCoordinatorShutdownTimeoutDoesNotCloseActiveStore(t *testing.T) {
-	for _, name := range []string{"handler", "Save", "startup"} {
+	for _, name := range []string{"handler", "Create", "startup"} {
 		t.Run(name, func(t *testing.T) {
 			s := newTestCoordinator()
 			p := newCoordinatorProcess(s, 40*time.Millisecond)
@@ -505,15 +541,13 @@ func TestCoordinatorShutdownTimeoutDoesNotCloseActiveStore(t *testing.T) {
 				}
 				returned = make(chan struct{})
 				go func() { <-release; leave(); close(returned) }()
-			case "Save":
+			case "Create":
 				entered := make(chan struct{})
 				inner := NewMemoryJobStore()
-				s.jobStore = &recoveryPassStore{JobStore: inner, save: func(record JobRecord) error {
-					if record.State == JobRunning {
-						close(entered)
-						<-release
-					}
-					return inner.Save(record)
+				s.jobStore = &recoveryPassStore{JobStore: inner, create: func(record JobRecord) (bool, error) {
+					close(entered)
+					<-release
+					return inner.Create(record)
 				}}
 				ctx, leave, _ := s.lifecycle.tryEnter(context.Background())
 				returned = make(chan struct{})

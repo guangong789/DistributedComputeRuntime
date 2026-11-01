@@ -25,7 +25,7 @@ flowchart LR
     class sqlite storageRole
 ```
 
-Client 同步向 Coordinator 提交任务，Coordinator 对存活的 Worker 进行轮询调度，并管理执行尝试和任务状态。Worker 执行任务并返回结果；对于 ZK 成功结果，Coordinator 独立验证证明，并在将终态持久化到 SQLite 后向 Client 返回响应。SQLite 保存的任务状态也为重启恢复提供依据。
+`SubmitJob` 将 Job 以 `Queued` 状态持久接纳；成功时返回相同的 JobID、`Accepted` 和 `AttemptID=0`，不返回执行终态。接纳后的调度和执行由 Coordinator 后台拥有，独立于提交 RPC 的生命周期。Client 通过 `GetJob` 观察持久化状态，并在产生终态后读取结果。已接纳 Job 的重复提交仍按既有 JobID/任务规格冲突规则拒绝。
 
 ## 核心能力
 
@@ -58,7 +58,7 @@ mTLS 能确认连接对端的身份，却不能单独决定它有权执行哪些
 
 如果 AttemptID 只在内存中，重启后从 1 开始就可能重新使用旧代次。SQLite 的 JobRecord 因而保存任务代次和完整任务规格。[分配尝试](cmd/coordinator/attempts.go) 时使用 `nextAttempt = max(inMemoryAttempt, persistedAttempt) + 1`，先保存 JobRunning 记录，再发布内存 AttemptID 和 lease，随后派发；保存失败就不会发布该次尝试。已持久化的 Attempt 7 在新进程中会继续为 Attempt 8。
 
-启动恢复将通过任务规格校验的 Running 记录标记为 Recovering，保留代次和输入，直到真正重新执行才分配新代次。[恢复入口](cmd/coordinator/jobs.go) 获取 JobID 所有权后重新读取记录，再转换为 JobSpec，复用普通提交的 `executeJobFromSource`。恢复因此沿用相同的重试、证明验证和终态接受规则，而不是另写一套容易分叉的执行逻辑。
+启动恢复将通过任务规格校验的 Running 记录标记为 Recovering，保留代次和输入。[Coordinator](cmd/coordinator/jobs.go) 从持久化的 Queued 和 Recovering 记录中发现待执行任务，并以自己拥有的执行会话管理工作。Attempt 的发布得到持久化确认后才会派发；AttemptID 和 lease 约束授权与结果接受。条件修复和在线对账保留不确定写入的处理责任，保护已有终态和较新代次。Client 通过 `GetJob` 独立观察持久化的终态结果。
 
 ### 5. 取消 Groth16 任务后，为什么不立即释放并发名额？
 
@@ -83,7 +83,7 @@ Worker 共享的 [ProvingLimiter](internal/runtime/proving_limiter.go) 因而将
 | Prove | 9.52 ms | 29.743 ms |
 | Verify | 0.50 ms | 0.615 ms |
 
-每项计时都是单次调用的观测值，不是统计平均值，也不代表生产吞吐量或统计扩展规律。N=8 共同采样的进程组 RSS 峰值为 **21,484 KiB**；有限采样不等于完整运行峰值或硬内存限制。测量定义见[基准测量合同](docs/benchmark-contracts.md)。
+每项计时都是单次调用的观测值，不是统计平均值，也不代表生产吞吐量或统计扩展规律。N=8 共同采样的进程组 RSS 峰值为 **21,484 KiB**；有限采样不等于完整运行峰值或硬内存限制。实验工具与验收条件见 [CPU 实验工具说明](tools/bench/README.md)。
 
 ## 快速开始
 
@@ -95,7 +95,7 @@ go run -mod=readonly ./cmd/demo
 
 需要满足 [go.mod](go.mod) 中 Go **1.27.1** 要求的本地工具链、Bash、OpenSSL 3、Git 和所需 GNU 工具，并提前缓存 Go 依赖；demo 的子命令使用离线构建，不会安装工具或下载缺失依赖。
 
-演示启动真实 Coordinator/Worker 进程，生成隔离的临时开发 PKI，通过 gRPC/mTLS 执行固定 hash 任务，并独立核对 SHA-256 输出与 SQLite 终态。两端均使用 `-disable-zk=true`，无需 Groth16 keys 或私密 witness；成功后回收所属子进程并删除临时文件。操作步骤、失败诊断和恢复测试导读见[本地演示指南](docs/demo.md)。
+演示启动真实 Coordinator/Worker 进程，生成隔离的临时开发 PKI，通过 gRPC/mTLS 接纳固定 hash 任务，再通过 `GetJob` 观察终态，并独立核对 SHA-256 输出与 SQLite 终态。两端均使用 `-disable-zk=true`，无需 Groth16 keys 或私密 witness；成功后回收所属子进程并删除临时文件。真实 ZK 执行与证明验证另由[集成测试](cmd/coordinator/zk_preimage_integration_test.go)覆盖。
 
 仅检查构建时，使用：
 
@@ -103,7 +103,7 @@ go run -mod=readonly ./cmd/demo
 go build -mod=readonly ./...
 ```
 
-构建检查不会启动演示或准备运行材料。手动以默认 ZK 模式启动服务，仍需受信任 CA 与匹配角色、端点的 mTLS 证书、身份允许列表、匹配的 Groth16 proving/verifying keys、Worker 本地 witness 数据和可写的 SQLite 路径。测试入口与环境要求见[测试执行合同](docs/testing.md)。
+构建检查不会启动演示或准备运行材料。手动以默认 ZK 模式启动服务，仍需受信任 CA 与匹配角色、端点的 mTLS 证书、身份允许列表、匹配的 Groth16 proving/verifying keys、Worker 本地 witness 数据和可写的 SQLite 路径。测试入口与环境要求见 [Go 测试工作流](scripts/README.md)。
 
 ## 范围与限制
 

@@ -108,7 +108,7 @@ func TestSubmitCancellationPersistsCurrentAttempt(t *testing.T) {
 			})
 			go func() {
 				defer close(finished)
-				result.resp, result.err = s.SubmitJob(parent, req)
+				result.resp, result.err = s.executeSubmissionForTest(parent, req)
 			}()
 			attempt := int64(1)
 			if tc.retry {
@@ -288,12 +288,24 @@ func TestSubmitCancellationBeforeAttemptPreservesExistingRecord(t *testing.T) {
 			if !afterClaim {
 				cancel()
 			}
-			resp, err := s.SubmitJob(parent, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "new-task", TimeoutMs: 1000})
+			submittedID := jobID
+			if afterClaim {
+				// Existing IDs are rejected before execution. A fresh ID retains
+				// the cancellation-after-claim-before-publication boundary.
+				submittedID++
+			}
+			resp, err := s.executeSubmissionForTest(parent, &runtimepb.SubmitJobRequest{JobId: submittedID, TaskType: "hash", Payload: "new-task", TimeoutMs: 1000})
 			if resp != nil || !errors.Is(err, context.Canceled) || calls.Load() != 0 ||
 				s.jobAttempts[jobID] != 7 || len(s.leases) != 0 {
 				t.Fatalf("pre-attempt cancellation created work: response=%v error=%v", resp, err)
 			}
 			assertRecoveryRecord(t, s.jobStore, record)
+			if afterClaim {
+				if _, found, err := s.jobStore.Load(submittedID); found || err != nil {
+					t.Fatalf("cancelled pre-admission inserted a row: found=%v error=%v", found, err)
+				}
+				assertRecoveryOwnershipReleased(t, s, submittedID)
+			}
 			assertRecoveryOwnershipReleased(t, s, jobID)
 			if observer.count("started", "") != 0 || observer.count("finished", "") != 0 || observer.count("terminal", "") != 0 {
 				t.Error("pre-attempt cancellation fabricated lifecycle events")
@@ -331,12 +343,12 @@ func TestSubmitCancellationAfterCommittedTerminalPreservesResult(t *testing.T) {
 				resp.Status = tc.status
 				return resp, nil
 			})
-			resp, err := s.SubmitJob(parent, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "terminal-task", TimeoutMs: 1000})
+			resp, err := s.executeSubmissionForTest(parent, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: "terminal-task", TimeoutMs: 1000})
 			if err != nil || resp == nil || resp.Status != tc.status || parent.Err() == nil {
 				t.Fatalf("accepted terminal changed: response=%v error=%v parent=%v", resp, err, parent.Err())
 			}
 			want := JobRecord{JobID: jobID, State: tc.state, AttemptID: 1, WorkerID: "worker",
-				TaskType: "hash", Payload: "terminal-task", TimeoutMs: 1000}
+				TaskType: "hash", Payload: "terminal-task", TimeoutMs: 1000, HasWorkerResult: true, Output: "done"}
 			assertRecoveryRecord(t, store, want)
 			if calls.Load() != 1 || len(store.savedRecords()) != 2 || observer.count("terminal", "") != 1 ||
 				observer.count("finished", "") != 1 || observer.count("started", "") != 1 {

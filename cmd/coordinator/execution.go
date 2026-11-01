@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
@@ -14,11 +13,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
-
-type dispatchResult struct {
-	resp *runtimepb.ExecuteJobResponse
-	err  error
-}
 
 // retryExhaustionError identifies only the retryable session exit and carries
 // the exact last attempt it published. Its RPC status remains Unavailable.
@@ -30,6 +24,19 @@ type retryExhaustionError struct {
 func (e *retryExhaustionError) Error() string              { return e.cause.Error() }
 func (e *retryExhaustionError) Unwrap() error              { return e.cause }
 func (e *retryExhaustionError) GRPCStatus() *status.Status { return status.Convert(e.cause) }
+
+func jobStoreErrorCode(err error) codes.Code {
+	if errors.Is(err, errQueuedPublicationConflict) {
+		return codes.Aborted
+	}
+	if errors.Is(err, ErrJobSpecConflict) || errors.Is(err, errJobAlreadyAdmitted) {
+		return codes.AlreadyExists
+	}
+	if errors.Is(err, errJobStoreNotConfigured) {
+		return codes.FailedPrecondition
+	}
+	return codes.Internal
+}
 
 func (s *CoordinatorServer) dispatchJob(
 	ctx context.Context,
@@ -74,10 +81,10 @@ func (s *CoordinatorServer) executeJob(
 	initialAttempt := s.jobAttempts[spec.JobID]
 	s.mu.Unlock()
 
-	resp, err := s.executeJobFromSource(ctx, spec, metrics.SourceSubmit)
+	result, err := s.executeAttempts(ctx, spec, metrics.SourceSubmit, true)
 	// An accepted terminal result wins if cancellation arrives during/after Save.
 	if err == nil {
-		return resp, err
+		return result.submitResponse(), nil
 	}
 	var exhausted *retryExhaustionError
 	if ctx.Err() == nil && errors.As(err, &exhausted) {
@@ -91,13 +98,13 @@ func (s *CoordinatorServer) executeJob(
 		// wrapped storage errors remain persistence failures even after cancel.
 		if persistenceErr != nil && persistenceErr != ctx.Err() {
 			log.Printf("submit failure persistence failed: job=%d attempt=%d err=%v", spec.JobID, exhausted.attemptID, persistenceErr)
-			return nil, status.Errorf(codes.Internal, "failed to finalize job %d attempt %d: %v (execution: %v)",
+			return nil, status.Errorf(jobStoreErrorCode(persistenceErr), "failed to finalize job %d attempt %d: %v (execution: %v)",
 				spec.JobID, exhausted.attemptID, persistenceErr, err)
 		}
 	}
 	contextErr := ctx.Err()
 	if contextErr == nil {
-		return resp, err
+		return nil, err
 	}
 	persisted, persistenceErr := s.persistSubmitCancellation(spec.JobID, initialAttempt)
 	if persistenceErr != nil {
@@ -116,19 +123,85 @@ func (s *CoordinatorServer) executeJobFromSource(
 	spec JobSpec,
 	source metrics.ExecutionSource,
 ) (*runtimepb.SubmitJobResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := s.checkZKAvailable(spec.TaskType); err != nil {
-		return nil, err
-	}
-	var err error
-	spec, err = validateJobSpec(spec)
+	result, err := s.executeAttempts(ctx, spec, source, false)
 	if err != nil {
 		return nil, err
 	}
+	return result.submitResponse(), nil
+}
 
-	observer := metrics.Resolve(s.metrics)
+// submitResponse is a compatibility adapter at the synchronous entrypoints.
+// The attempt engine and session loop exchange durable result data, not RPC responses.
+func (r *acceptedJobResult) submitResponse() *runtimepb.SubmitJobResponse {
+	return &runtimepb.SubmitJobResponse{
+		JobId: r.record.JobID, AttemptId: r.record.AttemptID, Status: r.workerStatus,
+		Output: r.record.Output, Error: r.record.Error,
+	}
+}
+
+// executeAttempts owns the bounded retry policy, not per-attempt execution or
+// entrypoint finalization. firstAdmission is true only for a new client submission;
+// retry/recovery retain their existing generation publication path. Its caller
+// holds the JobID claim throughout and supplies the session context.
+func (s *CoordinatorServer) executeAttempts(
+	ctx context.Context,
+	spec JobSpec,
+	source metrics.ExecutionSource,
+	firstAdmission bool,
+) (*acceptedJobResult, error) {
+	start := attemptSessionStart{mode: continueGeneration}
+	if firstAdmission {
+		start.mode = createRunningJob
+	}
+	result := s.executeAttemptSession(ctx, spec, source, start)
+	return result.terminal, result.err
+}
+
+// The queued first attempt uses the same two-attempt loop as Submit/recovery.
+// This trace retains both confirmed and uncertain publication provenance for
+// the internal owner, without changing the existing entrypoints' error policy.
+type firstPublicationMode uint8
+
+const (
+	continueGeneration firstPublicationMode = iota
+	createRunningJob
+	startPersistedQueuedJob
+)
+
+type attemptSessionStart struct {
+	mode   firstPublicationMode
+	queued JobRecord // exact durable snapshot; only used by startPersistedQueuedJob
+}
+
+type attemptSessionResult struct {
+	terminal           *acceptedJobResult
+	lastPublished      *JobRecord
+	pendingPublication *JobRecord
+	err                error
+}
+
+func (s *CoordinatorServer) executeAttemptSession(
+	ctx context.Context, spec JobSpec, source metrics.ExecutionSource, start attemptSessionStart,
+) (session attemptSessionResult) {
+	if err := ctx.Err(); err != nil {
+		session.err = err
+		return session
+	}
+	if err := s.checkZKAvailable(spec.TaskType); err != nil {
+		session.err = err
+		return session
+	}
+	var err error
+	// SubmitJob supplies an already validated spec. Recovery supplies the exact
+	// stored spec, which may contain valid legacy JSON. Keep its representation
+	// for every write; normalize only the execution/verification-facing copy.
+	storedSpec := spec
+	spec, err = validateJobSpec(spec)
+	if err != nil {
+		session.err = err
+		return session
+	}
+
 	const maxAttempts = 2
 	leaseDuration := s.leaseDuration
 	if leaseDuration <= 0 {
@@ -140,7 +213,8 @@ func (s *CoordinatorServer) executeJobFromSource(
 
 	for i := 0; i < maxAttempts; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			session.err = err
+			return session
 		}
 
 		worker, ok := s.getNextWorker()
@@ -148,234 +222,68 @@ func (s *CoordinatorServer) executeJobFromSource(
 			break
 		}
 
-		attemptID, err := s.startAttemptFromSource(
-			spec.JobID,
-			worker.ID,
-			leaseDuration,
-			spec.TaskType,
-			spec.Payload,
-			spec.TimeoutMs,
-			source,
-		)
+		var attemptID int64
+		if i == 0 && start.mode == startPersistedQueuedJob {
+			attemptID, err = s.startQueuedAttempt(start.queued, worker.ID, leaseDuration)
+		} else if i == 0 && start.mode == createRunningJob {
+			attemptID, err = s.admitJobAttempt(storedSpec, worker.ID, leaseDuration)
+		} else {
+			attemptID, err = s.startAttemptFromSource(
+				spec.JobID, worker.ID, leaseDuration,
+				storedSpec.TaskType, storedSpec.Payload, storedSpec.TimeoutMs, source,
+			)
+		}
 		if err != nil {
-			return nil, status.Errorf(
-				codes.Internal,
+			var publication *attemptPublicationError
+			if errors.As(err, &publication) {
+				candidate := publication.record
+				session.pendingPublication = &candidate
+			}
+			session.err = status.Errorf(
+				jobStoreErrorCode(err),
 				"failed to start attempt for job %d: %v",
 				spec.JobID,
 				err,
 			)
+			return session
 		}
 		lastPublishedAttempt = attemptID
+		session.lastPublished = &JobRecord{JobID: storedSpec.JobID, State: JobRunning,
+			AttemptID: attemptID, WorkerID: worker.ID, TaskType: storedSpec.TaskType,
+			Payload: storedSpec.Payload, TimeoutMs: storedSpec.TimeoutMs}
 
-		attemptStart := time.Now()
-		// Durable lifecycle events are omitted in the legacy nil-store mode.
-		finishAttempt := func(outcome metrics.AttemptOutcome) {
-			if s.jobStore != nil {
-				observer.AttemptFinished(source, outcome, time.Since(attemptStart))
-			}
-		}
-		attemptCtx, cancelAttempt := context.WithCancel(ctx)
-		resultCh := make(chan dispatchResult, 1)
-
-		s.dispatchWG.Add(1)
-		go func() {
-			defer s.dispatchWG.Done()
-			resp, err := s.dispatchJob(attemptCtx, worker, &runtimepb.ExecuteJobRequest{
-				JobId:     spec.JobID,
-				TaskType:  spec.TaskType,
-				Payload:   spec.Payload,
-				TimeoutMs: spec.TimeoutMs,
-				AttemptId: attemptID,
-			},
-			)
-
-			resultCh <- dispatchResult{
-				resp: resp,
-				err:  err,
-			}
-			if s.onDispatchDone != nil {
-				s.onDispatchDone(spec.JobID, attemptID)
-			}
-		}()
-
-		leaseTimer := time.NewTimer(leaseDuration)
-
-		select {
-		case result := <-resultCh:
-			leaseTimer.Stop()
-			cancelAttempt()
-
-			if err := ctx.Err(); err != nil {
-				finishAttempt(metrics.AttemptCancelled)
-				return nil, err
-			}
-
-			if result.err != nil {
-				lastErr = result.err
-				finishAttempt(metrics.AttemptRPCError)
-
-				fmt.Printf(
-					"attempt failed: job=%d attempt=%d worker=%s err=%v\n",
-					spec.JobID,
-					attemptID,
-					worker.ID,
-					result.err,
-				)
-
-				continue
-			}
-
-			resp := result.resp
-
-			if resp == nil ||
-				resp.JobId != spec.JobID ||
-				resp.AttemptId != attemptID ||
-				!s.isLeaseCurrent(spec.JobID, attemptID) {
-
-				lastErr = fmt.Errorf(
-					"stale, expired, or mismatched result for job %d attempt %d",
-					spec.JobID,
-					attemptID,
-				)
-
-				observer.AttemptRejected(source, metrics.RejectFencing)
-				finishAttempt(metrics.AttemptFenced)
-				continue
-			}
-
-			finalState, err := jobStateFromStatus(resp.Status)
-			if err != nil {
-				finishAttempt(metrics.AttemptInvalidStatus)
-				return nil, status.Errorf(
-					codes.Internal,
-					"invalid worker status for job %d attempt %d: %v",
-					spec.JobID,
-					attemptID,
-					err,
-				)
-			}
-
-			if spec.TaskType == "zk_preimage_prove" && finalState == JobSucceeded {
-				if err := verifyZKPreimageResult(
-					s.preimageVerifier,
-					spec.Payload,
-					resp.Output,
-					observer,
-				); err != nil {
-					lastErr = fmt.Errorf(
-						"preimage proof verification failed for job %d attempt %d: %w",
-						spec.JobID,
-						attemptID,
-						err,
-					)
-
-					observer.AttemptRejected(source, metrics.RejectProof)
-					finishAttempt(metrics.AttemptProofRejected)
-					fmt.Printf(
-						"attempt rejected: job=%d attempt=%d worker=%s err=%v\n",
-						spec.JobID,
-						attemptID,
-						worker.ID,
-						lastErr,
-					)
-
-					continue
-				}
-			}
-
-			record := JobRecord{
-				JobID:     spec.JobID,
-				State:     finalState,
-				AttemptID: attemptID,
-				WorkerID:  worker.ID,
-				TaskType:  spec.TaskType,
-				Payload:   spec.Payload,
-				TimeoutMs: spec.TimeoutMs,
-			}
-
-			eligible, err := s.persistTerminalResult(ctx, record)
-			if !eligible {
-				if err != nil {
-					finishAttempt(metrics.AttemptCancelled)
-					return nil, err
-				}
-				lastErr = fmt.Errorf(
-					"stale, expired, or mismatched result for job %d attempt %d",
-					spec.JobID,
-					attemptID,
-				)
-				observer.AttemptRejected(source, metrics.RejectFencing)
-				finishAttempt(metrics.AttemptFenced)
-				continue
-			}
-			if err != nil {
-				finishAttempt(metrics.AttemptPersistenceError)
-				return nil, status.Errorf(
-					codes.Internal,
-					"failed to persist final state for job %d attempt %d: %v",
-					spec.JobID,
-					attemptID,
-					err,
-				)
-			}
-
-			terminalState, outcome := metrics.TerminalSucceeded, metrics.AttemptAccepted
-			switch finalState {
-			case JobFailed:
-				terminalState, outcome = metrics.TerminalFailed, metrics.AttemptTaskFailed
-			case JobCancelled:
-				terminalState, outcome = metrics.TerminalCancelled, metrics.AttemptTaskCancelled
-			}
-			if s.jobStore != nil {
-				observer.JobTerminal(source, terminalState)
-			}
-			finishAttempt(outcome)
-			return &runtimepb.SubmitJobResponse{
-				JobId:     resp.JobId,
-				Status:    resp.Status,
-				Output:    resp.Output,
-				Error:     resp.Error,
-				AttemptId: resp.AttemptId,
-			}, nil
-
-		case <-leaseTimer.C:
-			cancelAttempt()
-			finishAttempt(metrics.AttemptLeaseExpired)
-
-			lastErr = fmt.Errorf(
-				"lease expired for job %d attempt %d",
-				spec.JobID,
-				attemptID,
-			)
-
-			fmt.Printf(
-				"lease expired: job=%d attempt=%d worker=%s\n",
-				spec.JobID,
-				attemptID,
-				worker.ID,
-			)
-
-			continue
-
-		case <-ctx.Done():
-			leaseTimer.Stop()
-			cancelAttempt()
-			finishAttempt(metrics.AttemptCancelled)
-
-			return nil, ctx.Err()
+		outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{
+			storedSpec: storedSpec, executionSpec: spec, worker: worker,
+			attemptID: attemptID, leaseDuration: leaseDuration, source: source,
+		})
+		switch outcome.kind {
+		case attemptAccepted:
+			session.terminal = outcome.terminal
+			return session
+		case attemptRPCFailed, attemptLeaseExpired, attemptFenced, attemptProofRejected:
+			lastErr = outcome.err
+		case attemptCancelled, attemptPersistenceFailed, attemptInvalidStatus:
+			session.err = outcome.err
+			return session
+		default:
+			session.err = status.Errorf(codes.Internal, "unknown outcome for job %d attempt %d", outcome.jobID, outcome.attemptID)
+			return session
 		}
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		session.err = err
+		return session
 	}
 	if lastErr != nil {
-		return nil, &retryExhaustionError{
+		session.err = &retryExhaustionError{
 			attemptID: lastPublishedAttempt,
 			cause:     status.Errorf(codes.Unavailable, "job submission failed: %v", lastErr),
 		}
+		return session
 	}
-	return nil, status.Error(codes.Unavailable, "no alive workers available")
+	session.err = status.Error(codes.Unavailable, "no alive workers available")
+	return session
 }
 
 // persistTerminalResult returns eligibility at the final check, plus any context
@@ -386,6 +294,7 @@ func (s *CoordinatorServer) executeJobFromSource(
 // Save. JobStore must not reenter the coordinator while saving. Verification
 // and metrics run outside this critical section. Time and cancellation can
 // still advance during Save; this is not a commit-before-deadline guarantee.
+// A Save error leaves the commit outcome uncertain; it does not prove rollback.
 func (s *CoordinatorServer) persistTerminalResult(ctx context.Context, record JobRecord) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

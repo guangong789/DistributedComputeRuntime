@@ -31,10 +31,48 @@ type JobRecord struct {
 	TaskType  string
 	Payload   string
 	TimeoutMs int64
+
+	// HasWorkerResult distinguishes an accepted (possibly empty) Worker result
+	// from legacy rows and coordinator-generated terminal states without one.
+	HasWorkerResult bool
+	Output          string
+	Error           string
 }
+
+var ErrJobSpecConflict = errors.New("job specification conflicts with stored specification")
+var ErrInvalidQueuedPublication = errors.New("invalid queued publication")
+var ErrInvalidRunningRepair = errors.New("invalid running repair")
+
+var errJobAlreadyAdmitted = errors.New("job is already durably admitted")
+var errJobStoreNotConfigured = errors.New("job store is not configured")
 
 type JobStore interface {
 	Load(jobID int64) (JobRecord, bool, error)
+	// Create atomically inserts the entire record only if JobID is absent.
+	// An existing JobID is unchanged and returns (false, nil), without comparing
+	// specifications. Errors return false but do not prove the insert rolled back.
+	Create(record JobRecord) (created bool, err error)
+	// TryStartQueued atomically changes an existing, unattempted Queued record to
+	// Running(1) with workerID. expected must have State=JobQueued, AttemptID=0,
+	// empty WorkerID/Output/Error and HasWorkerResult=false; workerID must be nonempty.
+	// Invalid inputs return ErrInvalidQueuedPublication (possibly wrapped).
+	// The durable record must match expected exactly, including its original spec.
+	// No spec normalization or validation is performed here, including for legacy rows.
+	// (true, nil) alone authorizes a subsequent lease and dispatch; AttemptID 0 never
+	// does. (false, nil) means a missing record or precondition mismatch, with no write.
+	// Errors return false and may conceal a committed Running(1): callers must not
+	// assume rollback or blindly retry. This does not make other Save writers conditional.
+	TryStartQueued(expected JobRecord, workerID string) (published bool, err error)
+	// TryRecoverRunning atomically changes only State to Recovering if the entire
+	// existing record equals expected: Running, positive AttemptID, assigned Worker,
+	// exact stored spec, and no result/residual fields. It never inserts a row.
+	// Invalid expected records return ErrInvalidRunningRepair. (false, nil) is a
+	// confirmed conflict; errors return false but do not establish rollback.
+	TryRecoverRunning(expected JobRecord) (repaired bool, err error)
+	// Save inserts absent JobIDs. For existing IDs, it atomically replaces mutable
+	// fields only if TaskType, Payload and TimeoutMs match the stored values exactly.
+	// ErrJobSpecConflict leaves the entire existing record unchanged.
+	// Other errors do not establish whether a write committed.
 	Save(record JobRecord) error
 	ListByState(state JobState) ([]JobRecord, error)
 }
@@ -50,10 +88,80 @@ func NewMemoryJobStore() *MemoryJobStores {
 	}
 }
 
+func (s *MemoryJobStores) Create(record JobRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.jobs[record.JobID]; exists {
+		return false, nil
+	}
+	s.jobs[record.JobID] = record
+	return true, nil
+}
+
+// isUnattemptedQueued defines eligibility for first-attempt publication only.
+// Create and Save intentionally continue accepting unrelated legacy records.
+func isUnattemptedQueued(record JobRecord) bool {
+	return record.State == JobQueued && record.AttemptID == 0 && record.WorkerID == "" &&
+		!record.HasWorkerResult && record.Output == "" && record.Error == ""
+}
+
+func validateQueuedPublication(expected JobRecord, workerID string) error {
+	if !isUnattemptedQueued(expected) {
+		return fmt.Errorf("%w: expected record must be unattempted Queued without results", ErrInvalidQueuedPublication)
+	}
+	if workerID == "" {
+		return fmt.Errorf("%w: worker ID is empty", ErrInvalidQueuedPublication)
+	}
+	return nil
+}
+
+func (s *MemoryJobStores) TryStartQueued(expected JobRecord, workerID string) (bool, error) {
+	if err := validateQueuedPublication(expected, workerID); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.jobs[expected.JobID]
+	if !exists || current != expected {
+		return false, nil
+	}
+	current.State, current.AttemptID, current.WorkerID = JobRunning, 1, workerID
+	s.jobs[expected.JobID] = current
+	return true, nil
+}
+
+func validateRunningRepair(expected JobRecord) error {
+	if expected.State != JobRunning || expected.AttemptID <= 0 || expected.WorkerID == "" ||
+		expected.HasWorkerResult || expected.Output != "" || expected.Error != "" {
+		return ErrInvalidRunningRepair
+	}
+	return nil
+}
+
+func (s *MemoryJobStores) TryRecoverRunning(expected JobRecord) (bool, error) {
+	if err := validateRunningRepair(expected); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, exists := s.jobs[expected.JobID]; !exists || current != expected {
+		return false, nil
+	}
+	expected.State = JobRecovering
+	s.jobs[expected.JobID] = expected
+	return true, nil
+}
+
 func (s *MemoryJobStores) Save(record JobRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if current, exists := s.jobs[record.JobID]; exists &&
+		(current.TaskType != record.TaskType || current.Payload != record.Payload || current.TimeoutMs != record.TimeoutMs) {
+		return ErrJobSpecConflict
+	}
 	s.jobs[record.JobID] = record
 	return nil
 }
@@ -118,6 +226,7 @@ func (s *CoordinatorServer) persistSubmitCancellation(jobID, initialAttempt int6
 		return false, nil
 	}
 	current.State = JobCancelled
+	current.HasWorkerResult, current.Output, current.Error = false, "", ""
 	if err := s.jobStore.Save(current); err != nil {
 		return false, fmt.Errorf("save cancelled job: %w", err)
 	}
@@ -150,6 +259,7 @@ func (s *CoordinatorServer) persistSubmitFailure(ctx context.Context, jobID, ini
 		return false, nil
 	}
 	current.State = JobFailed
+	current.HasWorkerResult, current.Output, current.Error = false, "", ""
 	if err := s.jobStore.Save(current); err != nil {
 		return false, fmt.Errorf("save failed job: %w", err)
 	}
@@ -157,10 +267,10 @@ func (s *CoordinatorServer) persistSubmitFailure(ctx context.Context, jobID, ini
 }
 
 // Called after store initialization, before any startup recovery writes or producers.
-// Inspect both states even after finding a match; never parse legacy payloads.
+// Inspect all unfinished states even after a match; never parse legacy payloads.
 func (s *CoordinatorServer) checkDisabledZKRecovery() error {
 	unfinished := false
-	for _, state := range []JobState{JobRunning, JobRecovering} {
+	for _, state := range []JobState{JobRunning, JobRecovering, JobQueued} {
 		records, err := s.jobStore.ListByState(state)
 		if err != nil {
 			return fmt.Errorf("check unfinished ZK jobs: %w", err)
@@ -189,15 +299,15 @@ func (s *CoordinatorServer) recoverRunningJobs() error {
 	}
 
 	for _, record := range records {
-		spec, err := validateJobSpec(jobSpecFromRecord(record))
+		_, err := validateJobSpec(jobSpecFromRecord(record))
 		if err != nil {
 			// Keep unsafe legacy rows untouched for explicit operator correction.
 			// Neither redispatch nor resave their original potentially private JSON.
 			fmt.Printf("startup recovery rejected job %d: invalid job specification\n", record.JobID)
 			continue
 		}
-		record.Payload = spec.Payload
 		record.State = JobRecovering
+		record.HasWorkerResult, record.Output, record.Error = false, "", ""
 
 		if err := s.jobStore.Save(record); err != nil {
 			return err
@@ -226,11 +336,11 @@ func (s *CoordinatorServer) retryRecoveringJob(
 // recoveryExecution records provenance before releasing ownership. A nil error
 // alone does not imply execution: a stale snapshot is deliberately skipped.
 type recoveryExecution struct {
-	executed     bool
-	terminal     bool
-	repairFailed bool
-	generation   int64
-	specHash     [32]byte
+	executed              bool
+	terminal              bool
+	reconciliationPending bool // Existing ledger owns settlement before claim release.
+	generation            int64
+	specHash              [32]byte
 }
 
 func (s *CoordinatorServer) retryRecoveringJobResult(ctx context.Context, record JobRecord) (result recoveryExecution, err error) {
@@ -249,7 +359,12 @@ func (s *CoordinatorServer) retryRecoveringJobResult(ctx context.Context, record
 			record.JobID,
 		)
 	}
-	defer s.releaseJob(record.JobID)
+	defer func() {
+		s.releaseJob(record.JobID)
+		if result.reconciliationPending {
+			s.notifyRecoveryReady()
+		}
+	}()
 
 	// A submission may have completed between the recovery pass's reload and
 	// this claim. Revalidate under ownership before executing the snapshot.
@@ -270,31 +385,22 @@ func (s *CoordinatorServer) retryRecoveringJobResult(ctx context.Context, record
 	observer := metrics.Resolve(s.metrics)
 	start := time.Now()
 	defer func() { observer.ObserveJobExecution(metrics.SourceRecovery, time.Since(start)) }()
-	s.mu.Lock()
-	initialAttempt := s.jobAttempts[record.JobID]
-	s.mu.Unlock()
-
 	result.executed = true
-	response, err := s.executeJobFromSource(ctx, spec, metrics.SourceRecovery)
-	result.terminal = err == nil
+	// Keep the shared engine's confirmed/attempted identities; the legacy
+	// response adapter discards precisely the provenance needed on write errors.
+	session := s.executeAttemptSession(ctx, spec, metrics.SourceRecovery, attemptSessionStart{mode: continueGeneration})
+	result.terminal = session.err == nil
 	if result.terminal {
-		result.generation = response.AttemptId
+		result.generation = session.terminal.record.AttemptID
+		return result, nil
 	}
-	if err != nil {
-		observer.RecoveryExecutionFailed(recoveryFailureReason(err))
-		s.mu.Lock()
-		failedAttempt := s.jobAttempts[record.JobID]
-		s.mu.Unlock()
-		// Repair only a generation published by this recovery execution.
-		// Keep ownership until the repair finishes, including during shutdown.
-		if failedAttempt > initialAttempt {
-			result.generation = failedAttempt
-			if repairErr := s.restoreRecoveringJob(record.JobID, failedAttempt); repairErr != nil {
-				result.repairFailed = true
-				return result, errors.Join(err, fmt.Errorf("restore recovering job %d attempt %d: %w",
-					record.JobID, failedAttempt, repairErr))
-			}
-		}
+	observer.RecoveryExecutionFailed(recoveryFailureReason(session.err))
+	if session.lastPublished != nil {
+		result.generation = session.lastPublished.AttemptID
 	}
+	if session.pendingPublication != nil {
+		result.generation = session.pendingPublication.AttemptID
+	}
+	_, result.reconciliationPending, err = s.settleAttemptSession(session, &record)
 	return result, err
 }

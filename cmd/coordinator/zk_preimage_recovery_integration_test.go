@@ -252,8 +252,15 @@ func TestPreimageJobRecoversAcrossSQLiteCoordinatorRestart(t *testing.T) {
 		t.Fatal("recovery loop did not stop")
 	}
 
+	var recoveredOutput string
+	select {
+	case recoveredOutput = <-proofOutput:
+	default:
+		t.Fatal("recovered Worker did not produce a proof")
+	}
 	succeeded2 := running1
 	succeeded2.State, succeeded2.AttemptID, succeeded2.WorkerID = JobSucceeded, 2, "recovery-worker"
+	succeeded2 = withWorkerResult(succeeded2, recoveredOutput, "")
 	assertRecoveryRecord(t, dbB, succeeded2)
 	assertPublicRecoveryPayload(t, succeeded2.Payload)
 	writesMu.Lock()
@@ -261,6 +268,7 @@ func TestPreimageJobRecoversAcrossSQLiteCoordinatorRestart(t *testing.T) {
 	writesMu.Unlock()
 	running2 := succeeded2
 	running2.State = JobRunning
+	running2.HasWorkerResult, running2.Output, running2.Error = false, "", ""
 	wantWrites := []JobRecord{running1, recovering1, running2, succeeded2}
 	if !reflect.DeepEqual(gotWrites, wantWrites) {
 		t.Fatalf("durable progression:\n got: %+v\nwant: %+v", gotWrites, wantWrites)
@@ -269,14 +277,9 @@ func TestPreimageJobRecoversAcrossSQLiteCoordinatorRestart(t *testing.T) {
 		t.Fatalf("recovered Worker calls=%d verifier calls=%d, want 1 each",
 			recoveredCalls.Load(), verifier.calls.Load())
 	}
-	select {
-	case output := <-proofOutput:
-		proof, err := base64.StdEncoding.DecodeString(output)
-		if err != nil || len(proof) == 0 {
-			t.Fatalf("recovered Worker returned invalid proof: bytes=%d error=%v", len(proof), err)
-		}
-	default:
-		t.Fatal("recovered Worker did not produce a proof")
+	proof, err := base64.StdEncoding.DecodeString(recoveredOutput)
+	if err != nil || len(proof) == 0 {
+		t.Fatalf("recovered Worker returned invalid proof: bytes=%d error=%v", len(proof), err)
 	}
 	lease, ok := coordinatorB.getLease(jobID)
 	if !ok || lease.AttemptID != 2 || lease.WorkerID != "recovery-worker" ||

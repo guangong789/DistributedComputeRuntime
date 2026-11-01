@@ -50,13 +50,14 @@ func startTestCoordinator(
 ) runtimepb.CoordinatorServiceClient {
 	t.Helper()
 	useTestWorkerTransport(coordinator)
+	startScheduler := prepareQueuedTestScheduler(t, coordinator)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnaryInterceptor(coordinator.lifecycle.unaryInterceptor()))
 	runtimepb.RegisterCoordinatorServiceServer(server, coordinator)
 
 	go func() {
@@ -79,7 +80,7 @@ func startTestCoordinator(
 		server.Stop()
 	})
 
-	return runtimepb.NewCoordinatorServiceClient(conn)
+	return &schedulingTestClient{CoordinatorServiceClient: runtimepb.NewCoordinatorServiceClient(conn), start: startScheduler, service: coordinator}
 }
 
 func coordinatorWorkerSnapshot(
@@ -367,6 +368,7 @@ func TestSQLiteRestartRecoversJobAfterWorkerReregistration(t *testing.T) {
 	}
 	want := running
 	want.State, want.AttemptID = JobSucceeded, 2
+	want = withWorkerResult(want, "done", "")
 	assertSQLiteJobRecord(t, storeB, want)
 	if firstCalls.Load() != 1 || secondCalls.Load() != 1 || coordinatorB.jobAttempts[jobID] != 2 {
 		t.Fatalf("wrong attempt counts: first=%d second=%d generation=%d",

@@ -25,7 +25,7 @@ flowchart LR
     class sqlite storageRole
 ```
 
-The Client submits jobs synchronously to the Coordinator, which selects live Workers using round robin and manages execution attempts and job state. Workers execute tasks and return results. For successful ZK results, the Coordinator independently verifies the proof and durably saves terminal state to SQLite before returning a response to the Client. The persisted job state also supports recovery after restart.
+`SubmitJob` durably admits a Job in `Queued` state. Successful admission returns `Accepted` with the same JobID and `AttemptID=0`, without terminal execution results. After admission, Coordinator-owned background scheduling and execution are independent of the submitting RPC's lifetime. Clients use `GetJob` to observe durable state and terminal results when available. Resubmissions of admitted Jobs are rejected under the existing JobID/specification conflict rules.
 
 ## Core Capabilities
 
@@ -58,7 +58,7 @@ The [execution path](cmd/coordinator/execution.go) checks response JobID, Attemp
 
 An in-memory AttemptID could reset to 1 after restart and reuse an old generation. SQLite JobRecords therefore retain the generation and full task specification. [Attempt allocation](cmd/coordinator/attempts.go) uses `nextAttempt = max(inMemoryAttempt, persistedAttempt) + 1`, saves JobRunning first, publishes the in-memory AttemptID and lease, and then dispatches. A failed Save publishes no attempt; a persisted Attempt 7 advances to Attempt 8 in a fresh process.
 
-Startup recovery marks Running records with valid task specifications as Recovering, retaining their generation and inputs until execution actually resumes. The [recovery entry point](cmd/coordinator/jobs.go) claims JobID ownership, reloads the record, converts it to JobSpec, and reuses the ordinary submission path's executeJobFromSource. Recovery consequently follows the same retry, proof verification, and terminal acceptance rules rather than maintaining a second execution implementation that can drift.
+Startup recovery marks Running records with valid task specifications as Recovering, retaining their generation and inputs. The [Coordinator](cmd/coordinator/jobs.go) discovers durable Queued and Recovering Jobs and manages them through Coordinator-owned execution sessions. An Attempt is dispatched only after its publication is durably confirmed; AttemptIDs and leases fence authorization and result acceptance. Conditional repair and online reconciliation retain responsibility for uncertain writes while preserving existing terminal results and newer generations. Clients independently observe persisted terminal results through `GetJob`.
 
 ### 5. Why doesn't cancelling a Groth16 task immediately release its concurrency slot?
 
@@ -83,7 +83,7 @@ The standalone [MiMC Chain](internal/zk/experimental/mimcchain/circuit.go) uses 
 | Prove | 9.52 ms | 29.743 ms |
 | Verify | 0.50 ms | 0.615 ms |
 
-Each timing is a single observed invocation, not a statistical average or a claim about production throughput or statistical scaling. The N=8 common-sample process-group RSS peak was **21,484 KiB**; finite sampling does not establish the lifetime peak or a hard memory limit. Measurement definitions are in the [benchmark contracts](docs/benchmark-contracts.md).
+Each timing is a single observed invocation, not a statistical average or a claim about production throughput or statistical scaling. The N=8 common-sample process-group RSS peak was **21,484 KiB**; finite sampling does not establish the lifetime peak or a hard memory limit. Experiment tooling and acceptance conditions are described in the [CPU tooling README](tools/bench/README.md).
 
 ## Quick Start
 
@@ -95,7 +95,7 @@ go run -mod=readonly ./cmd/demo
 
 You need a local toolchain meeting the Go **1.27.1** requirement in [go.mod](go.mod), Bash, OpenSSL 3, Git, the required GNU utilities, and cached Go dependencies. The demo's child commands build offline; they do not install tools or download missing dependencies.
 
-The demo starts real Coordinator/Worker processes, generates isolated temporary development PKI, executes a deterministic hash task over gRPC/mTLS, and independently checks the SHA-256 output and SQLite terminal state. Both services use `-disable-zk=true`, so no Groth16 keys or private witness are required. On success, it reaps owned child processes and removes temporary files. See the [local demo guide (Chinese)](docs/demo.md) for operation, failure diagnostics, and the recovery-test walkthrough.
+The demo starts real Coordinator/Worker processes, generates isolated temporary development PKI, admits a deterministic hash task over gRPC/mTLS, observes its terminal state through `GetJob`, and independently checks the SHA-256 output and SQLite terminal state. Both services use `-disable-zk=true`, so no Groth16 keys or private witness are required. On success, it reaps owned child processes and removes temporary files. Real ZK execution and proof verification are covered separately by [integration tests](cmd/coordinator/zk_preimage_integration_test.go).
 
 For a build check alone, use:
 
@@ -103,7 +103,7 @@ For a build check alone, use:
 go build -mod=readonly ./...
 ```
 
-A build check neither starts the demo nor provisions runtime materials. Starting services manually in the default ZK mode still requires a trusted CA and role- and endpoint-matching mTLS certificates, identity allowlists, matching Groth16 proving/verifying keys, Worker-local witness data, and a writable SQLite path. See the [test execution contract](docs/testing.md) for test entry points and environment requirements.
+A build check neither starts the demo nor provisions runtime materials. Starting services manually in the default ZK mode still requires a trusted CA and role- and endpoint-matching mTLS certificates, identity allowlists, matching Groth16 proving/verifying keys, Worker-local witness data, and a writable SQLite path. See the [Go test workflow](scripts/README.md) for test entry points and environment requirements.
 
 ## Scope and Limitations
 

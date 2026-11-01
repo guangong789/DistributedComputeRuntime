@@ -163,6 +163,9 @@ func TestStartAttemptUsesHigherOfMemoryAndStore(t *testing.T) {
 				State:     JobRunning,
 				AttemptID: tt.persistedAttempt,
 				WorkerID:  "previous-worker",
+				TaskType:  "hash",
+				Payload:   "hello",
+				TimeoutMs: 1000,
 			}); err != nil {
 				t.Fatalf("seed store: %v", err)
 			}

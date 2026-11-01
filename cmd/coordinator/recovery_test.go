@@ -14,10 +14,36 @@ import (
 )
 
 type recoveryPassStore struct {
-	JobStore
-	list func(JobState) ([]JobRecord, error)
-	load func(int64) (JobRecord, bool, error)
-	save func(JobRecord) error
+	JobStore       JobStore
+	list           func(JobState) ([]JobRecord, error)
+	load           func(int64) (JobRecord, bool, error)
+	save           func(JobRecord) error
+	create         func(JobRecord) (bool, error)
+	startQueued    func(JobRecord, string) (bool, error)
+	recoverRunning func(JobRecord) (bool, error)
+}
+
+var _ JobStore = (*recoveryPassStore)(nil)
+
+func (s *recoveryPassStore) TryRecoverRunning(expected JobRecord) (bool, error) {
+	if s.recoverRunning != nil {
+		return s.recoverRunning(expected)
+	}
+	return s.JobStore.TryRecoverRunning(expected)
+}
+
+func (s *recoveryPassStore) TryStartQueued(expected JobRecord, workerID string) (bool, error) {
+	if s.startQueued != nil {
+		return s.startQueued(expected, workerID)
+	}
+	return s.JobStore.TryStartQueued(expected, workerID)
+}
+
+func (s *recoveryPassStore) Create(record JobRecord) (bool, error) {
+	if s.create != nil {
+		return s.create(record)
+	}
+	return s.JobStore.Create(record)
 }
 
 func (s *recoveryPassStore) ListByState(state JobState) ([]JobRecord, error) {
@@ -112,9 +138,13 @@ func TestRecoveryLoopRunsAgainAfterLaterRegistration(t *testing.T) {
 	inner := NewMemoryJobStore()
 	record := recoveringTestRecord()
 	saveRecoveryRecord(t, inner, record)
-	var scans, calls atomic.Int32
+	var scans, queuedScans, calls atomic.Int32
 	terminal := make(chan JobRecord, 2)
 	store := &recoveryPassStore{JobStore: inner, list: func(state JobState) ([]JobRecord, error) {
+		if state == JobQueued {
+			queuedScans.Add(1)
+			return inner.ListByState(state)
+		}
 		scans.Add(1)
 		if state != JobRecovering {
 			t.Errorf("listed state=%v, want Recovering", state)
@@ -153,6 +183,7 @@ func TestRecoveryLoopRunsAgainAfterLaterRegistration(t *testing.T) {
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, "worker"
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, inner, want)
 	select {
 	case <-done:
@@ -179,6 +210,7 @@ func TestRecoveryLoopRunsAgainAfterLaterRegistration(t *testing.T) {
 		t.Fatal("later registration did not trigger a second pass")
 	}
 	later.State, later.AttemptID, later.WorkerID = JobSucceeded, 8, "worker"
+	later = withWorkerResult(later, "done", "")
 	assertRecoveryRecord(t, inner, later)
 	cancel()
 	select {
@@ -186,8 +218,8 @@ func TestRecoveryLoopRunsAgainAfterLaterRegistration(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("canceled recovery loop did not exit")
 	}
-	if scans.Load() != 2 || calls.Load() != 2 {
-		t.Fatalf("repeated recovery: scans=%d calls=%d, want 2 each", scans.Load(), calls.Load())
+	if scans.Load() != 2 || queuedScans.Load() != 2 || calls.Load() != 2 {
+		t.Fatalf("repeated recovery: Recovering scans=%d Queued scans=%d calls=%d, want 2 each", scans.Load(), queuedScans.Load(), calls.Load())
 	}
 	assertRecoveryOwnershipReleased(t, s, record.JobID)
 	assertRecoveryOwnershipReleased(t, s, later.JobID)
@@ -308,6 +340,7 @@ func TestRecoveryPassContinuesAfterJobErrors(t *testing.T) {
 			}
 			assertRecoveryRecord(t, inner, first)
 			second.State, second.AttemptID, second.WorkerID = JobSucceeded, 8, "worker"
+			second = withWorkerResult(second, "done", "")
 			assertRecoveryRecord(t, inner, second)
 			assertRecoveryOwnershipReleased(t, s, second.JobID)
 			if scenario == "already active" {
@@ -353,9 +386,13 @@ func TestRecoveryLoopCoalescesSignalsDuringExecution(t *testing.T) {
 	record := recoveringTestRecord()
 	inner := NewMemoryJobStore()
 	saveRecoveryRecord(t, inner, record)
-	var scans, calls atomic.Int32
+	var scans, queuedScans, calls atomic.Int32
 	secondScan := make(chan struct{})
 	store := &recoveryPassStore{JobStore: inner, list: func(state JobState) ([]JobRecord, error) {
+		if state == JobQueued {
+			queuedScans.Add(1)
+			return inner.ListByState(state)
+		}
 		if scans.Add(1) == 2 {
 			close(secondScan)
 		}
@@ -401,7 +438,7 @@ func TestRecoveryLoopCoalescesSignalsDuringExecution(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("registrations blocked behind recovery")
 	}
-	if scans.Load() != 1 || calls.Load() != 1 || len(s.recoveryReady) != 1 {
+	if scans.Load() != 1 || queuedScans.Load() != 1 || calls.Load() != 1 || len(s.recoveryReady) != 1 {
 		t.Fatalf("overlapping passes or missing coalesced signal: scans=%d calls=%d queued=%d",
 			scans.Load(), calls.Load(), len(s.recoveryReady))
 	}
@@ -420,11 +457,12 @@ func TestRecoveryLoopCoalescesSignalsDuringExecution(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery loop did not exit")
 	}
-	if scans.Load() != 2 || calls.Load() != 1 || s.jobAttempts[record.JobID] != 8 {
+	if scans.Load() != 2 || queuedScans.Load() != 2 || calls.Load() != 1 || s.jobAttempts[record.JobID] != 8 {
 		t.Fatalf("duplicate execution: scans=%d calls=%d attempt=%d", scans.Load(), calls.Load(), s.jobAttempts[record.JobID])
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, "worker"
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, inner, want)
 	assertRecoveryOwnershipReleased(t, s, record.JobID)
 }
@@ -481,6 +519,7 @@ func TestRecoveryLoopRetriesRecoveringJobAfterLaterRegistration(t *testing.T) {
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, "worker"
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, inner, want)
 	if calls.Load() != 1 || s.jobAttempts[record.JobID] != 8 {
 		t.Fatalf("unexpected retry: calls=%d attempt=%d", calls.Load(), s.jobAttempts[record.JobID])
@@ -492,10 +531,14 @@ func TestRecoveryLoopContinuesAfterFailedPass(t *testing.T) {
 	record := recoveringTestRecord()
 	inner := NewMemoryJobStore()
 	saveRecoveryRecord(t, inner, record)
-	var scans atomic.Int32
+	var scans, queuedScans atomic.Int32
 	firstScan := make(chan struct{})
 	completed := make(chan struct{}, 1)
 	store := &recoveryPassStore{JobStore: inner, list: func(state JobState) ([]JobRecord, error) {
+		if state == JobQueued {
+			queuedScans.Add(1)
+			return inner.ListByState(state)
+		}
 		if scans.Add(1) == 1 {
 			close(firstScan)
 			return nil, errors.New("temporary list failure")
@@ -542,11 +585,12 @@ func TestRecoveryLoopContinuesAfterFailedPass(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery loop did not exit")
 	}
-	if scans.Load() != 2 || calls.Load() != 1 {
-		t.Fatalf("error continuation: scans=%d calls=%d", scans.Load(), calls.Load())
+	if scans.Load() != 2 || queuedScans.Load() != 1 || calls.Load() != 1 {
+		t.Fatalf("error continuation: Recovering scans=%d Queued scans=%d calls=%d", scans.Load(), queuedScans.Load(), calls.Load())
 	}
 	want := record
 	want.State, want.AttemptID, want.WorkerID = JobSucceeded, 8, "worker"
+	want = withWorkerResult(want, "done", "")
 	assertRecoveryRecord(t, inner, want)
 	assertRecoveryOwnershipReleased(t, s, record.JobID)
 }
