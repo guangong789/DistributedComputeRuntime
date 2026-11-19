@@ -160,11 +160,16 @@ func (s *WorkerService) ExecuteJob(
 		return nil, status.Error(codes.ResourceExhausted, result.Err.Error())
 	}
 
+	var diagnostic string
+	if stage := cudavector.FailureStage(result.Err); stage != "" {
+		diagnostic = " cuda_failure_stage=" + stage
+	}
 	fmt.Printf(
-		"executing job: id=%d attempt=%d type=%s\n",
+		"executing job: id=%d attempt=%d type=%s%s\n",
 		req.JobId,
 		req.AttemptId,
 		req.TaskType,
+		diagnostic,
 	)
 
 	return &runtimepb.ExecuteJobResponse{

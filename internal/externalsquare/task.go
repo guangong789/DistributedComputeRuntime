@@ -59,7 +59,7 @@ func (t Task) Execute(ctx context.Context) (string, error) {
 			return "", errors.New("external_square child returned an invalid or incorrect result")
 		}
 		return expected, nil
-	})
+	}, nil)
 	if errors.Is(err, externalcompute.ErrBusy) {
 		return "", ErrBusy
 	}

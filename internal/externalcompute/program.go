@@ -51,7 +51,9 @@ func NewProgram(name, path string, slot *Slot) (*Program, error) {
 }
 
 // Run owns the child and its slot through I/O cleanup and result verification.
-func (p *Program) Run(ctx context.Context, input string, verify func(string) (string, error)) (string, error) {
+// afterFailedExit, when supplied, receives bounded stderr for an unsuccessful
+// exit without context cancellation. Overflow and signal exits supply no text.
+func (p *Program) Run(ctx context.Context, input string, verify func(string) (string, error), afterFailedExit func(string)) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -87,6 +89,13 @@ func (p *Program) Run(ctx context.Context, input string, verify func(string) (st
 	}
 	switch {
 	case exitedWithError:
+		if afterFailedExit != nil {
+			diagnostic := ""
+			if exit.ExitCode() > 0 && !stderr.overflow {
+				diagnostic = string(stderr.data[:stderr.size])
+			}
+			afterFailedExit(diagnostic)
+		}
 		return "", fmt.Errorf("%s: %v", p.name, exit)
 	case errors.Is(runErr, exec.ErrWaitDelay):
 		return "", fmt.Errorf("%s child I/O did not finish", p.name)
