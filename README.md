@@ -62,4 +62,5 @@ make test-fast
 
 新提交的 `zk_preimage_prove` 任务会在持久化之前以 `FailedPrecondition` 拒绝。若 SQLite 数据库包含这种已退役任务的 Queued、Running 或 Recovering 记录，Coordinator 会在初始化表结构或执行恢复写入前拒绝启动。可用兼容的旧版本完成未结束任务，也可改用其他数据库。原记录会保留，历史终态记录仍可通过 GetJob 查询。
 
-[仓库 URL](https://github.com/guangong789/DistributedZKRuntime) 和 Go module 路径仍使用现有名称 `github.com/guangong789/DistributedZKRuntime`。
+[GitHub 仓库](https://github.com/guangong789/DistributedComputeRuntime)和 Go module 使用 `github.com/guangong789/DistributedComputeRuntime`。
+为兼容已有证书和监控配置，部署继续使用 SPIFFE 信任域 `distributedzk.local`、现有开发 CA 主题和 Prometheus 指标前缀 `dzkr_`。

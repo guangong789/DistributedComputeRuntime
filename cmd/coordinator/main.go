@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	prommetrics "github.com/guangong789/DistributedComputeRuntime/internal/metrics/prometheus"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

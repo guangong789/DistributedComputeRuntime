@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )

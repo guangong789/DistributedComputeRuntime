@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 type WorkerStatus int

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtime "github.com/guangong789/DistributedComputeRuntime/internal/runtime"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"golang.org/x/sys/unix"
 )
 

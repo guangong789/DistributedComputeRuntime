@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalsquare"
 )
 
 func main() {

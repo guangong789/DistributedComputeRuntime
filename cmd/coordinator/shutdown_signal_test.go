@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
+	"github.com/guangong789/DistributedComputeRuntime/internal/testutil/testpki"
 )
 
 type coordinatorSignalOutput struct {

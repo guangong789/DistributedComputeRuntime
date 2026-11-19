@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

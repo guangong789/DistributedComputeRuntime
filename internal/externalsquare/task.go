@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strconv"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalcompute"
 )
 
 const (

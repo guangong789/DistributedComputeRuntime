@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
-	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
-	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalcompute"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalsquare"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

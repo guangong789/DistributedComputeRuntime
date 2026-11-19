@@ -1,4 +1,4 @@
-module github.com/guangong789/DistributedZKRuntime
+module github.com/guangong789/DistributedComputeRuntime
 
 go 1.27.1
 

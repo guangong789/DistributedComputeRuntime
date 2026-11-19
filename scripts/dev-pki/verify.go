@@ -17,7 +17,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
+	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
 )
 
 func main() {

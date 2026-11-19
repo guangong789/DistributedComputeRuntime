@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

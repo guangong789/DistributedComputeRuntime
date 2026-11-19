@@ -3,7 +3,7 @@ package rpcauth
 import (
 	"errors"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )

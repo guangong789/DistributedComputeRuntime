@@ -17,9 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
-	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/jobobservation"
+	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -62,9 +62,9 @@ func prerequisites(ctx context.Context, repo string) error {
 	}
 	data, err := os.ReadFile(filepath.Join(repo, "go.mod"))
 	if err != nil {
-		return errors.New("run the demo from the DistributedZKRuntime repository root")
+		return errors.New("run the demo from the repository root")
 	}
-	if !strings.HasPrefix(string(data), "module github.com/guangong789/DistributedZKRuntime\n") {
+	if !strings.HasPrefix(string(data), "module github.com/guangong789/DistributedComputeRuntime\n") {
 		return errors.New("unexpected repository module")
 	}
 	required := ""

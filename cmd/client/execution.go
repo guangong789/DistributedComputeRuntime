@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/jobobservation"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 type clientExecutionConfig struct {

@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"net/url"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	_ "modernc.org/sqlite"
 )
 

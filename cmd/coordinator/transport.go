@@ -7,8 +7,8 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

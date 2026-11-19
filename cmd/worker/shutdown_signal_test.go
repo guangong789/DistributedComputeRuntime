@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 type workerSignalOutput struct {

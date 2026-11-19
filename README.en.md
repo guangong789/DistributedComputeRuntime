@@ -62,4 +62,5 @@ See the [Go test workflow](scripts/README.md) for full regression and Race profi
 
 New `zk_preimage_prove` submissions are rejected with `FailedPrecondition` before admission. If the configured SQLite database contains a Queued, Running, or Recovering row for that retired task type, the Coordinator refuses startup before schema initialization or recovery writes. Finish pending work with a compatible prior release or configure another database. The original rows are retained. Historical terminal rows remain readable through GetJob.
 
-The [repository URL](https://github.com/guangong789/DistributedZKRuntime) and Go module path `github.com/guangong789/DistributedZKRuntime` still use the existing name.
+The [GitHub repository](https://github.com/guangong789/DistributedComputeRuntime) and Go module use `github.com/guangong789/DistributedComputeRuntime`.
+For compatibility with existing credentials and monitoring, deployments use the SPIFFE trust domain `distributedzk.local`, the existing development CA subject, and the Prometheus prefix `dzkr_`.

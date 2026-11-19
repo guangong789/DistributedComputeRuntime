@@ -13,19 +13,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
-	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
-	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
-	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
-	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	workerheartbeat "github.com/guangong789/DistributedZKRuntime/internal/workerheartbeat"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalcompute"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalsquare"
+	prommetrics "github.com/guangong789/DistributedComputeRuntime/internal/metrics/prometheus"
+	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
+	workerheartbeat "github.com/guangong789/DistributedComputeRuntime/internal/workerheartbeat"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
+	runtime "github.com/guangong789/DistributedComputeRuntime/internal/runtime"
 )
 
 type WorkerService struct {

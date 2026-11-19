@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/jobobservation"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	workerheartbeat "github.com/guangong789/DistributedZKRuntime/internal/workerheartbeat"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	workerheartbeat "github.com/guangong789/DistributedComputeRuntime/internal/workerheartbeat"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 )
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/testutil/testpki"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"

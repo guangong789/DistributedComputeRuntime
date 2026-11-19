@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	prommetrics "github.com/guangong789/DistributedComputeRuntime/internal/metrics/prometheus"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"

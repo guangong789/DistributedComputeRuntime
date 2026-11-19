@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/jobobservation"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/jobobservation"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 // getJob makes one observation using the caller's connection and context. It

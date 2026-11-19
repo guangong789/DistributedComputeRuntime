@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	workerheartbeat "github.com/guangong789/DistributedZKRuntime/internal/workerheartbeat"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	workerheartbeat "github.com/guangong789/DistributedComputeRuntime/internal/workerheartbeat"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

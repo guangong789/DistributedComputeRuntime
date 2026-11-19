@@ -1,6 +1,6 @@
 # Go build and test output
-/DistributedZKRuntime
-/DistributedZKRuntime.exe
+/DistributedComputeRuntime
+/DistributedComputeRuntime.exe
 /client
 /client.exe
 /coordinator

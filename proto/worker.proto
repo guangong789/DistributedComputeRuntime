@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package runtime;
 
-option go_package = "github.com/guangong789/DistributedZKRuntime/proto;runtimepb";
+option go_package = "github.com/guangong789/DistributedComputeRuntime/proto;runtimepb";
 
 service WorkerService {
   rpc ExecuteJob(ExecuteJobRequest) returns (ExecuteJobResponse);

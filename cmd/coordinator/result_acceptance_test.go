@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 // Delay the first Worker reply to exercise cancellation and expiration at dispatch.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 )
 
 func TestExecuteJobEchoesAttemptID(t *testing.T) {

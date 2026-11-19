@@ -780,7 +780,7 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x0eRegisterWorker\x12\x1e.runtime.RegisterWorkerRequest\x1a\x1f.runtime.RegisterWorkerResponse\x12B\n" +
 	"\tSubmitJob\x12\x19.runtime.SubmitJobRequest\x1a\x1a.runtime.SubmitJobResponse\x12B\n" +
 	"\tHeartbeat\x12\x19.runtime.HeartbeatRequest\x1a\x1a.runtime.HeartbeatResponse\x129\n" +
-	"\x06GetJob\x12\x16.runtime.GetJobRequest\x1a\x17.runtime.GetJobResponseB=Z;github.com/guangong789/DistributedZKRuntime/proto;runtimepbb\x06proto3"
+	"\x06GetJob\x12\x16.runtime.GetJobRequest\x1a\x17.runtime.GetJobResponseBBZ@github.com/guangong789/DistributedComputeRuntime/proto;runtimepbb\x06proto3"
 
 var (
 	file_proto_worker_proto_rawDescOnce sync.Once

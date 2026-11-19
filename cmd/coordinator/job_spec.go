@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
-	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"github.com/guangong789/DistributedComputeRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalsquare"
+	runtime "github.com/guangong789/DistributedComputeRuntime/internal/runtime"
+	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
