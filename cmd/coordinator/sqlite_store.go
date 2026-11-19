@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -13,7 +15,7 @@ type SQLiteJobStore struct {
 }
 
 func NewSQLiteJobStore(path string) (*SQLiteJobStore, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteJobStoreDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -28,6 +30,22 @@ func NewSQLiteJobStore(path string) (*SQLiteJobStore, error) {
 	}
 
 	return store, nil
+}
+
+func sqliteJobStoreDSN(path string) string {
+	// Set a 100 ms default on each physical connection. Appending preserves the
+	// driver's precedence for an explicit timeout and leaves other options intact.
+	const busyTimeout = "_busy_timeout=100"
+	switch query := strings.IndexByte(path, '?'); {
+	case query > 0:
+		return path + "&" + busyTimeout
+	case query == 0 || path == "":
+		// The driver treats a leading '?' literally. An escaped URI also
+		// preserves SQLite's empty filename for a temporary database.
+		return "file:" + (&url.URL{Path: path}).EscapedPath() + "?" + busyTimeout
+	default:
+		return path + "?" + busyTimeout
+	}
 }
 
 func (s *SQLiteJobStore) initSchema() error {
