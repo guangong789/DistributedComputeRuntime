@@ -212,7 +212,7 @@ func TestSQLiteRestartRecoversJobAfterWorkerReregistration(t *testing.T) {
 	const jobID int64 = 801
 	const workerID = "restarted-worker"
 	request := &runtimepb.SubmitJobRequest{
-		JobId: jobID, TaskType: "hash", Payload: "proof-input", TimeoutMs: 1500,
+		JobId: jobID, TaskType: "hash", Payload: "recovery-input", TimeoutMs: 1500,
 	}
 	dbPath := filepath.Join(t.TempDir(), "jobs.db")
 	storeA, err := NewSQLiteJobStore(dbPath)

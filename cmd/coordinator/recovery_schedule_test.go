@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -128,9 +127,9 @@ func TestRecoveryBackoffBoundsAndSaturation(t *testing.T) {
 }
 
 func TestRecoverySchedulerBusyWorkerBecomesAvailable(t *testing.T) {
-	fixture := newIntegrationZKFixture(t)
+	const payload = "reliable compute fixture"
 	store := newWorkerFailureStore(t)
-	record := preimageRecord(9800, 7, "old-worker", JobRecovering, fixture.payload)
+	record := workerFailureRecord(9800, 7, "old-worker", JobRecovering, payload)
 	saveRecoveryRecord(t, store, record)
 	observer := &recordingMetrics{}
 	terminal := make(chan struct{}, 1)
@@ -145,19 +144,17 @@ func TestRecoverySchedulerBusyWorkerBecomesAvailable(t *testing.T) {
 			terminal <- struct{}{}
 		}
 	}
-	s := &CoordinatorServer{jobStore: store, preimageVerifier: fixture.verifier, metrics: observer, recoveryReady: make(chan struct{}, 1)}
-	limiter, err := runtime.NewProvingLimiter(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !limiter.TryAcquire() {
-		t.Fatal("cannot occupy capacity")
-	}
-	var release sync.Once
-	t.Cleanup(func() { release.Do(limiter.Release) })
+	s := &CoordinatorServer{jobStore: store, metrics: observer, recoveryReady: make(chan struct{}, 1)}
+	var busy atomic.Bool
+	busy.Store(true)
 	var calls atomic.Int32
-	proving := &admissionProvingMetrics{}
-	registerTestWorker(t, s, "worker", limitedPreimageWorker(fixture, limiter, proving, &calls))
+	registerTestWorker(t, s, "worker", func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+		calls.Add(1)
+		if busy.Load() {
+			return nil, status.Error(codes.ResourceExhausted, "external compute capacity is full")
+		}
+		return executeHashJob(ctx, req)
+	})
 	c := newManualRecoveryClock()
 	q := testRecoverySchedule(c)
 	stop := startManualRecovery(t, s, q, c)
@@ -185,20 +182,20 @@ func TestRecoverySchedulerBusyWorkerBecomesAvailable(t *testing.T) {
 		}
 		waitRecoveryReset(t, c, time.Second)
 	}
-	release.Do(limiter.Release) // Stays Alive; releasing capacity sends no event.
+	busy.Store(false) // Stays Alive; releasing capacity sends no event.
 	c.advance(time.Second - time.Nanosecond)
 	s.notifyRecoveryReady()
 	waitRecoveryReset(t, c, time.Nanosecond)
-	if calls.Load() != 2 || proving.samples.Load() != 0 {
+	if calls.Load() != 2 {
 		t.Fatal("notification bypassed cooldown")
 	}
 	c.advance(time.Nanosecond)
 	waitRecoverySignal(t, terminal)
 	stop()
 	want.State, want.AttemptID = JobSucceeded, 10
-	want = withWorkerResult(want, storedProofOutput(t, store, record.JobID, fixture), "")
+	want = withWorkerResult(want, hashResult(payload), "")
 	assertRecoveryRecord(t, store, want)
-	if calls.Load() != 3 || proving.samples.Load() != 1 || observer.count("verification", "") != 1 || observer.count("started", "") != 3 || observer.count("finished", "") != 3 || observer.count("submitted", "") != 0 || observer.count("terminal", "") != 1 {
+	if calls.Load() != 3 || observer.count("started", "") != 3 || observer.count("finished", "") != 3 || observer.count("submitted", "") != 0 || observer.count("terminal", "") != 1 {
 		t.Fatalf("incorrect execution metrics: %+v", observer.snapshot())
 	}
 	if len(q.entries) != 0 || !q.deadline(nil).IsZero() {

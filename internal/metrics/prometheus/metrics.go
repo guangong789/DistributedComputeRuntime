@@ -26,8 +26,6 @@ type Metrics struct {
 	admissionDuration *prom.HistogramVec
 	attemptDuration   *prom.HistogramVec
 	recoveryDuration  *prom.HistogramVec
-	provingDuration   prom.Histogram
-	verifyDuration    prom.Histogram
 	collectors        []prom.Collector
 }
 
@@ -43,7 +41,7 @@ func New(registerer prom.Registerer) (*Metrics, error) {
 	counter := func(name, help string, labels ...string) *prom.CounterVec {
 		return prom.NewCounterVec(prom.CounterOpts{Namespace: "dzkr", Name: name, Help: help}, labels)
 	}
-	// Milliseconds through one minute cover proof work, the 5-second lease,
+	// Milliseconds through one minute cover the 5-second lease,
 	// and longer execution/recovery sessions. Prometheus adds the +Inf bucket.
 	buckets := []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
 	histogramOptions := func(name, help string) prom.HistogramOpts {
@@ -54,7 +52,7 @@ func New(registerer prom.Registerer) (*Metrics, error) {
 		jobsTerminal:      counter("jobs_terminal_total", "Durably accepted terminal job results.", "source", "state"),
 		attemptsStarted:   counter("attempts_started_total", "Durably published attempts.", "source"),
 		attemptsFinished:  counter("attempts_finished_total", "Accepted or abandoned attempts.", "source", "outcome"),
-		attemptsRejected:  counter("attempts_rejected_total", "Attempts rejected by fencing or proof validation.", "source", "reason"),
+		attemptsRejected:  counter("attempts_rejected_total", "Attempts rejected by fencing.", "source", "reason"),
 		workerTransitions: counter("worker_state_transitions_total", "Actual worker registry state changes.", "from", "to", "cause"),
 		recoveryPasses:    counter("recovery_passes_total", "Completed or interrupted recovery scans.", "outcome"),
 		recoveryChanges:   counter("recovery_transitions_total", "Durable Running to Recovering transitions.", "cause"),
@@ -64,13 +62,11 @@ func New(registerer prom.Registerer) (*Metrics, error) {
 		admissionDuration: prom.NewHistogramVec(histogramOptions("job_admission_duration_seconds", "Atomic Create admission duration, excluding validation, duplicate prechecks and execution; store_error is uncertain."), []string{"outcome"}),
 		attemptDuration:   prom.NewHistogramVec(histogramOptions("attempt_duration_seconds", "Duration until an attempt is accepted or abandoned."), []string{"source", "outcome"}),
 		recoveryDuration:  prom.NewHistogramVec(histogramOptions("recovery_pass_duration_seconds", "Recovery scan duration."), []string{"outcome"}),
-		provingDuration:   prom.NewHistogram(histogramOptions("zk_proving_duration_seconds", "Time spent in actual preimage proving calls.")),
-		verifyDuration:    prom.NewHistogram(histogramOptions("zk_verification_duration_seconds", "Time spent in actual proof verification calls.")),
 	}
 	m.collectors = []prom.Collector{
 		m.jobsSubmitted, m.jobsTerminal, m.attemptsStarted, m.attemptsFinished, m.attemptsRejected,
 		m.workerTransitions, m.recoveryPasses, m.recoveryChanges, m.recoveryFailures, m.repairFailures,
-		m.jobDuration, m.admissionDuration, m.attemptDuration, m.recoveryDuration, m.provingDuration, m.verifyDuration,
+		m.jobDuration, m.admissionDuration, m.attemptDuration, m.recoveryDuration,
 	}
 	if err := registerer.Register(m); err != nil {
 		return nil, fmt.Errorf("register runtime metrics: %w", err)
@@ -138,7 +134,7 @@ func (m *Metrics) AttemptStarted(source metrics.ExecutionSource) {
 func (m *Metrics) AttemptFinished(source metrics.ExecutionSource, outcome metrics.AttemptOutcome, duration time.Duration) {
 	if !validSource(source) || !oneOf(outcome, metrics.AttemptAccepted, metrics.AttemptRPCError,
 		metrics.AttemptLeaseExpired, metrics.AttemptCancelled, metrics.AttemptFenced,
-		metrics.AttemptProofRejected, metrics.AttemptTaskFailed, metrics.AttemptTaskCancelled,
+		metrics.AttemptTaskFailed, metrics.AttemptTaskCancelled,
 		metrics.AttemptInvalidStatus, metrics.AttemptPersistenceError) {
 		return
 	}
@@ -149,7 +145,7 @@ func (m *Metrics) AttemptFinished(source metrics.ExecutionSource, outcome metric
 }
 
 func (m *Metrics) AttemptRejected(source metrics.ExecutionSource, reason metrics.AttemptRejectReason) {
-	if validSource(source) && oneOf(reason, metrics.RejectFencing, metrics.RejectProof) {
+	if validSource(source) && reason == metrics.RejectFencing {
 		m.attemptsRejected.WithLabelValues(string(source), string(reason)).Inc()
 	}
 }
@@ -191,17 +187,5 @@ func (m *Metrics) RecoveryExecutionFailed(reason metrics.RecoveryFailureReason) 
 func (m *Metrics) RecoveryRepairFailed(stage metrics.RecoveryRepairStage) {
 	if oneOf(stage, metrics.RepairLoad, metrics.RepairSave) {
 		m.repairFailures.WithLabelValues(string(stage)).Inc()
-	}
-}
-
-func (m *Metrics) ObserveZKProving(duration time.Duration) {
-	if duration >= 0 {
-		m.provingDuration.Observe(duration.Seconds())
-	}
-}
-
-func (m *Metrics) ObserveZKVerification(duration time.Duration) {
-	if duration >= 0 {
-		m.verifyDuration.Observe(duration.Seconds())
 	}
 }

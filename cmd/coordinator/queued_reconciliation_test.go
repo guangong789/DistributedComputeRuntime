@@ -28,7 +28,7 @@ func installQueuedReconciliation(s *CoordinatorServer, expected JobRecord, previ
 func TestQueuedReconciliationDurableStates(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		for _, scenario := range []string{"running", "retry candidate", "retry previous", "recovering", "recovering previous", "queued",
-			"succeeded empty", "failed", "cancelled before publication", "newer terminal", "legacy ZK", "missing", "different generation",
+			"succeeded empty", "failed", "cancelled before publication", "newer terminal", "exact payload bytes", "missing", "different generation",
 			"different worker", "different spec", "recovering conflict", "inconsistent queued", "inconsistent result", "inconsistent terminal", "unknown state"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				s, inner, seed := queuedSessionFixture(t, backend)
@@ -41,8 +41,8 @@ func TestQueuedReconciliationDurableStates(t *testing.T) {
 					previous = &old
 					expected.AttemptID, expected.WorkerID = 2, "retry-worker"
 				}
-				if scenario == "legacy ZK" {
-					expected.TaskType, expected.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
+				if scenario == "exact payload bytes" {
+					expected.TaskType, expected.Payload = "hash", `  original input  `
 				}
 				current := expected
 				unresolved := false

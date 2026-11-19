@@ -158,12 +158,11 @@ func (f *mtlsCoordinator) assertUnchanged(t *testing.T, before mtlsSnapshot, job
 
 func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 	f := newMTLSCoordinator(t)
-	zk := newIntegrationZKFixture(t)
-	f.s.preimageVerifier = zk.verifier
+	const payload = "reliable compute fixture"
 	var executions atomic.Int32
 	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, r *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		executions.Add(1)
-		return zk.execute(ctx, r, nil)
+		return executeHashJob(ctx, r)
 	})
 	workerConn := f.connection(t, testpki.Worker)
 	workerClient := &recordingCoordinatorClient{CoordinatorServiceClient: runtimepb.NewCoordinatorServiceClient(workerConn)}
@@ -186,16 +185,16 @@ func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 		t.Fatal("worker recovery did not publish one alive scheduling entry")
 	}
 	client := f.observingClient(t, testpki.Client)
-	response, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 10001, TaskType: "zk_preimage_prove", Payload: zk.payload, TimeoutMs: 2000})
+	response, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{JobId: 10001, TaskType: "hash", Payload: payload, TimeoutMs: 2000})
 	if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 1 || executions.Load() != 1 {
 		t.Fatalf("authorized submission failed: %v", err)
 	}
 	record, ok, err := f.store.Load(10001)
-	if err != nil || !ok || record.State != JobSucceeded || record.AttemptID != 1 || record.WorkerID != "worker-a" || record.Payload != zk.payload {
-		t.Fatal("authenticated ZK completion was not verified/persisted correctly")
+	if err != nil || !ok || record.State != JobSucceeded || record.AttemptID != 1 || record.WorkerID != "worker-a" || record.Payload != payload || record.Output != hashResult(payload) {
+		t.Fatal("authenticated hash completion was not persisted correctly")
 	}
-	if f.observer.count("verification", "") != 1 || f.observer.count("submitted", "") != 1 || !f.s.claimJob(10001) {
-		t.Fatal("verification/metrics/ownership semantics changed")
+	if f.observer.count("submitted", "") != 1 || !f.s.claimJob(10001) {
+		t.Fatal("metrics/ownership semantics changed")
 	}
 	f.s.releaseJob(10001)
 	// Same authenticated identity may update its endpoint without another order entry.
@@ -337,7 +336,7 @@ func TestCoordinatorMTLSAuthenticatedPayloadValidation(t *testing.T) {
 	f := newMTLSCoordinator(t)
 	client := f.observingClient(t, testpki.Client)
 	before := f.snapshot()
-	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 10004, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"ref","digest":"1","secret":"PRIVATE_MARKER"}`, TimeoutMs: 1000})
+	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 10004, TaskType: "cuda_vector_transform", Payload: "PRIVATE_MARKER", TimeoutMs: 1000})
 	if response != nil || status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("payload validation after authentication: %v", err)
 	}

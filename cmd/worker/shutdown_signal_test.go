@@ -64,7 +64,7 @@ func TestWorkerSignalSubprocess(t *testing.T) {
 	address, ca, _, _, _ := startShutdownCoordinator(t, service)
 	cfg := workerTestConfig(t, ca, address)
 	args := []string{"-id", cfg.ID, "-listen", cfg.ListenAddress, "-advertise", cfg.AdvertiseAddress, "-coordinator", cfg.CoordinatorAddress,
-		"-proving-key", cfg.ProvingKeyPath, "-witness-file", cfg.WitnessFilePath, "-metrics-listen", cfg.MetricsAddress, "-shutdown-timeout", "2s",
+		"-metrics-listen", cfg.MetricsAddress, "-shutdown-timeout", "2s",
 		"-tls-cert", cfg.Security.CertFile, "-tls-key", cfg.Security.KeyFile, "-tls-ca", cfg.Security.CAFile}
 	encoded, err := json.Marshal(args)
 	if err != nil {

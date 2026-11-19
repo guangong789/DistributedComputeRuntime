@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"reflect"
 	"sync"
@@ -10,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
@@ -115,9 +113,6 @@ func (m *recordingMetrics) RecoveryExecutionFailed(r metrics.RecoveryFailureReas
 }
 func (m *recordingMetrics) RecoveryRepairFailed(s metrics.RecoveryRepairStage) {
 	m.record(recordedMetric{name: "repair_failed", label: string(s)})
-}
-func (m *recordingMetrics) ObserveZKVerification(d time.Duration) {
-	m.record(recordedMetric{name: "verification", duration: d})
 }
 func (m *recordingMetrics) count(name, label string) int {
 	count := 0
@@ -230,83 +225,6 @@ func TestMetricsPersistenceOrdering(t *testing.T) {
 			}
 			if !reflect.DeepEqual(names, want) {
 				t.Fatalf("events=%v, want %v", names, want)
-			}
-		})
-	}
-}
-
-type metricVerifier struct {
-	verify func([]byte, fr.Element) error
-}
-
-func (v metricVerifier) Verify(proof []byte, digest fr.Element) error {
-	return v.verify(proof, digest)
-}
-
-func TestMetricsZKVerificationOrdering(t *testing.T) {
-	validOutput, digest, realVerifier := preimageProofFixture(t)
-	payload := preimagePublicPayload(digest)
-	for _, scenario := range []string{"valid", "fenced", "invalid proof"} {
-		t.Run(scenario, func(t *testing.T) {
-			observer := &recordingMetrics{}
-			inner := NewMemoryJobStore()
-			s := &CoordinatorServer{metrics: observer}
-			s.jobStore = &recoveryPassStore{JobStore: inner, save: func(record JobRecord) error {
-				if err := inner.Save(record); err != nil {
-					return err
-				}
-				if record.State == JobSucceeded {
-					observer.record(recordedMetric{name: "terminal_saved"})
-				}
-				return nil
-			}}
-			s.preimageVerifier = metricVerifier{verify: func(proof []byte, digest fr.Element) error {
-				observer.record(recordedMetric{name: "verifier_called"})
-				return realVerifier.Verify(proof, digest)
-			}}
-			registerTestWorker(t, s, "worker", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
-				resp := successfulResult(req)
-				resp.Output = validOutput
-				if scenario == "fenced" {
-					resp.JobId++
-				} else if scenario == "invalid proof" {
-					resp.Output = base64.StdEncoding.EncodeToString([]byte("corrupted proof"))
-				}
-				return resp, nil
-			})
-			resp, err := submitPreimageJob(t, s, 902, payload)
-			if scenario == "valid" {
-				if err != nil || resp == nil || resp.Status != "Succeeded" {
-					t.Fatalf("valid proof response=%v error=%v", resp, err)
-				}
-				var order []string
-				for _, e := range observer.snapshot() {
-					switch e.name {
-					case "verifier_called", "verification", "terminal_saved", "terminal":
-						order = append(order, e.name)
-					}
-				}
-				want := []string{"verifier_called", "verification", "terminal_saved", "terminal"}
-				if !reflect.DeepEqual(order, want) || observer.count("started", "") != 1 ||
-					observer.count("finished", string(metrics.AttemptAccepted)) != 1 {
-					t.Fatalf("valid proof metric ordering=%v", order)
-				}
-				return
-			}
-			if resp != nil || status.Code(err) != codes.Unavailable || observer.count("submitted", "") != 1 ||
-				observer.count("started", "") != 2 || observer.count("finished", "") != 2 ||
-				observer.count("terminal", "") != 1 || observer.count("terminal", string(metrics.TerminalFailed)) != 1 {
-				t.Fatalf("rejected proof response=%v error=%v events=%+v", resp, err, observer.snapshot())
-			}
-			if scenario == "fenced" {
-				if observer.count("rejected", string(metrics.RejectFencing)) != 2 ||
-					observer.count("verification", "") != 0 || observer.count("verifier_called", "") != 0 {
-					t.Fatalf("fenced responses invoked verification: %+v", observer.snapshot())
-				}
-			} else if observer.count("rejected", string(metrics.RejectProof)) != 2 ||
-				observer.count("verification", "") != 2 ||
-				observer.count("finished", string(metrics.AttemptProofRejected)) != 2 {
-				t.Fatalf("invalid proof metrics=%+v", observer.snapshot())
 			}
 		})
 	}

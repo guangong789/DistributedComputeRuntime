@@ -14,7 +14,6 @@ import (
 
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
@@ -57,9 +56,6 @@ type CoordinatorServer struct {
 	// Configure before serving. Worker readiness notifications coalesce.
 	recoveryReady chan struct{}
 
-	preimageVerifier PreimageProofVerifier
-	// Immutable after startup; the zero value retains ZK-enabled behavior.
-	zkDisabled bool
 	// Configure before serving; implementations must support concurrent calls.
 	metrics metrics.Metrics
 	// Configure before serving. Nil fails closed; isolated tests may explicitly
@@ -77,12 +73,8 @@ func (s *CoordinatorServer) SubmitJob(
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "SubmitJob request is required")
 	}
-	if err := s.checkZKAvailable(req.TaskType); err != nil {
-		return nil, err
-	}
-
-	spec, err := validateJobSpec(jobSpecFromRequest(req))
-	if err != nil {
+	spec := jobSpecFromRequest(req)
+	if err := validateJobSpec(spec); err != nil {
 		return nil, err
 	}
 	if s.jobStore == nil {
@@ -148,19 +140,13 @@ func main() {
 		"path to coordinator SQLite database",
 	)
 
-	verifyingKeyPath := flag.String(
-		"verifying-key",
-		"zk-artifacts/preimage/verifying.key",
-		"path to preimage verifying key",
-	)
-
 	metricsAddress := flag.String("metrics-listen", "127.0.0.1:9090", "metrics HTTP listen address (required; loopback by default)")
 	execution := coordinatorExecutionFlags(flag.CommandLine)
 	security := coordinatorSecurityFlags(flag.CommandLine)
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := runCoordinator(ctx, *execution, *security, *dbPath, *verifyingKeyPath, *metricsAddress); err != nil {
+	if err := runCoordinator(ctx, *execution, *security, *dbPath, *metricsAddress); err != nil {
 		// Incomplete shutdown must not run deferred resource closure. Unfinished
 		// Running records retain the existing crash-recovery semantics on restart.
 		log.Print(err)
@@ -170,7 +156,7 @@ func main() {
 
 // runCoordinator owns startup and runtime resources. All exits, including startup
 // and Serve failures, use the same shutdown protocol; it never calls os.Exit.
-func runCoordinator(ctx context.Context, execution coordinatorExecutionConfig, security coordinatorSecurityConfig, dbPath, verifyingKeyPath, metricsAddress string) (runErr error) {
+func runCoordinator(ctx context.Context, execution coordinatorExecutionConfig, security coordinatorSecurityConfig, dbPath, metricsAddress string) (runErr error) {
 	if err := execution.validate(); err != nil {
 		return fmt.Errorf("coordinator execution configuration: %w", err)
 	}
@@ -182,8 +168,7 @@ func runCoordinator(ctx context.Context, execution coordinatorExecutionConfig, s
 		return fmt.Errorf("coordinator mTLS configuration: %w", err)
 	}
 	coordinator := &CoordinatorServer{
-		zkDisabled: execution.DisableZK,
-		workers:    make(map[string]WorkerInfo), jobAttempts: make(map[int64]int64),
+		workers: make(map[string]WorkerInfo), jobAttempts: make(map[int64]int64),
 		leases: make(map[int64]JobLease), activeJobs: make(map[int64]struct{}),
 		leaseDuration: execution.AttemptLease, recoveryReady: make(chan struct{}, 1),
 		workerCredentials: transport.workerCredentials,
@@ -197,7 +182,7 @@ func runCoordinator(ctx context.Context, execution coordinatorExecutionConfig, s
 	initialized := make(chan error, 1)
 	go func() {
 		defer close(startupDone)
-		initialized <- initializeCoordinator(process, execution, transport, dbPath, verifyingKeyPath, metricsAddress)
+		initialized <- initializeCoordinator(process, execution, transport, dbPath, metricsAddress)
 	}()
 	select {
 	case <-ctx.Done():
@@ -221,13 +206,13 @@ func runCoordinator(ctx context.Context, execution coordinatorExecutionConfig, s
 	}
 }
 
-func initializeCoordinator(process *coordinatorProcess, execution coordinatorExecutionConfig, transport *coordinatorTransport, dbPath, verifyingKeyPath, metricsAddress string) error {
+func initializeCoordinator(process *coordinatorProcess, execution coordinatorExecutionConfig, transport *coordinatorTransport, dbPath, metricsAddress string) error {
 	coordinator := process.service
 	ctx := coordinator.lifecycle.ctx
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	store, err := NewSQLiteJobStore(dbPath)
+	store, err := openSQLiteJobStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open job store: %w", err)
 	}
@@ -236,16 +221,14 @@ func initializeCoordinator(process *coordinatorProcess, execution coordinatorExe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if coordinator.zkDisabled {
-		if err := coordinator.checkDisabledZKRecovery(); err != nil {
-			return err
-		}
-	} else {
-		preimageVerifier, err := zk.LoadPreimageVerifier(verifyingKeyPath)
-		if err != nil {
-			return fmt.Errorf("load preimage verifier: %w", err)
-		}
-		coordinator.preimageVerifier = preimageVerifier
+	if err := store.checkRetiredJobs(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := store.initSchema(); err != nil {
+		return fmt.Errorf("initialize job store: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err

@@ -18,7 +18,7 @@ func TestAuthorizedAttemptUsesPublishedGeneration(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		name := "first submission"
 		if recovery {
-			name = "legacy recovery"
+			name = "recovery"
 		}
 		t.Run(name, func(t *testing.T) {
 			inner := NewMemoryJobStore()
@@ -27,20 +27,19 @@ func TestAuthorizedAttemptUsesPublishedGeneration(t *testing.T) {
 			stored := JobSpec{JobID: 9801, TaskType: "hash", Payload: "input", TimeoutMs: 1000}
 			source, workerStatus := metrics.SourceSubmit, "Succeeded"
 			if recovery {
-				stored.TaskType, stored.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
+				stored.TaskType, stored.Payload = "hash", `  original input  `
 				source, workerStatus = metrics.SourceRecovery, "Failed"
 				saveRecoveryRecord(t, inner, JobRecord{JobID: stored.JobID, State: JobRecovering,
 					AttemptID: 7, WorkerID: "old", TaskType: stored.TaskType, Payload: stored.Payload, TimeoutMs: stored.TimeoutMs})
 			}
-			execution, err := validateJobSpec(stored)
-			if err != nil {
+			if err := validateJobSpec(stored); err != nil {
 				t.Fatal(err)
 			}
 			var calls atomic.Int32
 			registerTestWorker(t, s, "selected", func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 				calls.Add(1)
-				if req.JobId != execution.JobID || req.TaskType != execution.TaskType ||
-					req.Payload != execution.Payload || req.TimeoutMs != execution.TimeoutMs {
+				if req.JobId != stored.JobID || req.TaskType != stored.TaskType ||
+					req.Payload != stored.Payload || req.TimeoutMs != stored.TimeoutMs {
 					t.Errorf("dispatch did not use the validated execution snapshot: %+v", req)
 				}
 				if _, ok := ctx.Deadline(); !ok {
@@ -55,6 +54,7 @@ func TestAuthorizedAttemptUsesPublishedGeneration(t *testing.T) {
 			worker, _ := s.getNextWorker()
 			const leaseDuration = time.Minute
 			var id int64
+			var err error
 			if recovery {
 				id, err = s.startAttemptFromSource(stored.JobID, worker.ID, leaseDuration,
 					stored.TaskType, stored.Payload, stored.TimeoutMs, source)
@@ -87,7 +87,7 @@ func TestAuthorizedAttemptUsesPublishedGeneration(t *testing.T) {
 				}}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{storedSpec: stored, executionSpec: execution,
+			outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{spec: stored,
 				worker: worker, attemptID: id, leaseDuration: leaseDuration, source: source})
 			s.dispatchWG.Wait()
 			wantID, wantState := int64(1), JobSucceeded
@@ -173,7 +173,7 @@ func TestAuthorizedAttemptLeavesPolicyToSession(t *testing.T) {
 				t.Error("unexpected finalization Save")
 				return inner.Save(r)
 			}}
-			outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{storedSpec: stored, executionSpec: stored,
+			outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{spec: stored,
 				worker: worker, attemptID: id, leaseDuration: time.Minute, source: metrics.SourceSubmit})
 			s.dispatchWG.Wait()
 			code := status.Code(outcome.err)

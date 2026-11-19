@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"net"
 	"net/url"
 	"sync/atomic"
@@ -12,9 +11,7 @@ import (
 	"time"
 
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,14 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type observedWitnessStore struct {
-	store runtime.WitnessStore
-	calls atomic.Int32
-}
-
-func (s *observedWitnessStore) Get(ref string) (int64, bool) { s.calls.Add(1); return s.store.Get(ref) }
-
-func startExecutionWorker(t *testing.T, ca *testpki.CA, service *WorkerService) (string, *workerTransport) {
+func startExecutionWorker(t *testing.T, ca *testpki.CA, service runtimepb.WorkerServiceServer) (string, *workerTransport) {
 	t.Helper()
 	files := ca.Issue(t, testpki.Worker, nil)
 	transport, err := loadWorkerTransport("worker-a", "localhost:50050", rpcauth.CoordinatorClientConfig{CertFile: files.Cert, KeyFile: files.Key, CAFile: files.CA, ServerIdentity: testpki.Coordinator})
@@ -71,59 +61,32 @@ func executionCoordinatorClient(t *testing.T, ca *testpki.CA, address string) ru
 	return runtimepb.NewWorkerServiceClient(conn)
 }
 
-func TestWorkerExecutionMTLSAuthorizedTasksAndBusy(t *testing.T) {
+func TestWorkerExecutionMTLSAuthorizedTasks(t *testing.T) {
 	ca := testpki.New(t)
-	prover, verifier := newTestPreimageProver(t)
-	witnesses := runtime.NewMemoryWitnessStore()
-	witnesses.Put("secret-001", 42)
-	limiter := newTestProvingLimiter(t)
-	observer := &workerProvingMetrics{durations: make(chan time.Duration, 2)}
-	address, _ := startExecutionWorker(t, ca, &WorkerService{preimageProver: prover, witnessStore: witnesses, provingLimiter: limiter, metrics: observer})
+	address, _ := startExecutionWorker(t, ca, &WorkerService{})
 	client := executionCoordinatorClient(t, ca, address)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, tc := range []struct{ task, payload string }{{"hash", "hello"}, {"sleep", "0s"}} {
 		r, err := client.ExecuteJob(ctx, &runtimepb.ExecuteJobRequest{JobId: 11001, AttemptId: 7, TaskType: tc.task, Payload: tc.payload, TimeoutMs: 1000})
 		if err != nil || r.GetStatus() != "Succeeded" || r.GetJobId() != 11001 || r.GetAttemptId() != 7 {
-			t.Fatalf("authorized non-ZK task: %v", err)
+			t.Fatalf("authorized task: %v", err)
 		}
 	}
-	digest := zk.ComputePreimageDigest(42)
-	req := &runtimepb.ExecuteJobRequest{JobId: 11002, AttemptId: 8, TaskType: "zk_preimage_prove", Payload: preimageTestPayload(t, "secret-001", digest), TimeoutMs: 2000}
-	if !limiter.TryAcquire() {
-		t.Fatal("cannot occupy proving slot")
-	}
-	response, err := client.ExecuteJob(ctx, req)
-	limiter.Release()
-	if response != nil || status.Code(err) != codes.ResourceExhausted || len(observer.durations) != 0 {
-		t.Fatalf("mTLS changed busy classification: %v", err)
-	}
-	response, err = client.ExecuteJob(ctx, req)
-	if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 8 {
-		t.Fatalf("authorized proving: %v", err)
-	}
-	proof, err := base64.StdEncoding.DecodeString(response.Output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := verifier.Verify(proof, digest); err != nil {
-		t.Fatal(err)
-	}
-	if len(observer.durations) != 1 {
-		t.Fatal("unexpected proving metrics")
-	}
+
 }
 
-func TestWorkerExecutionMTLSRejectsBeforeWitnessAndProving(t *testing.T) {
+func TestWorkerExecutionMTLSRejectsBeforeBusiness(t *testing.T) {
 	ca := testpki.New(t)
-	prover, _ := newTestPreimageProver(t)
-	inner := runtime.NewMemoryWitnessStore()
-	inner.Put("secret-001", 42)
-	store := &observedWitnessStore{store: inner}
-	limiter := newTestProvingLimiter(t)
-	observer := &workerProvingMetrics{durations: make(chan time.Duration, 1)}
-	address, _ := startExecutionWorker(t, ca, &WorkerService{preimageProver: prover, witnessStore: store, provingLimiter: limiter, metrics: observer})
-	req := &runtimepb.ExecuteJobRequest{JobId: 11003, AttemptId: 1, TaskType: "zk_preimage_prove", Payload: preimageTestPayload(t, "secret-001", zk.ComputePreimageDigest(42)), TimeoutMs: 2000}
+	var calls atomic.Int32
+	worker := &WorkerService{}
+	service := shutdownExecutionService{execute: func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+		calls.Add(1)
+		return worker.ExecuteJob(ctx, req)
+	}}
+	address, _ := startExecutionWorker(t, ca, service)
+	req := &runtimepb.ExecuteJobRequest{JobId: 11003, AttemptId: 1, TaskType: "sleep", Payload: "1ms", TimeoutMs: 2000}
+
 	for _, tc := range []struct {
 		name, identity                string
 		change                        func(*x509.Certificate)
@@ -170,13 +133,9 @@ func TestWorkerExecutionMTLSRejectsBeforeWitnessAndProving(t *testing.T) {
 			if err == nil || response != nil {
 				t.Fatal("forbidden caller entered business execution or returned a task-level result")
 			}
-			if store.calls.Load() != 0 || len(observer.durations) != 0 {
-				t.Fatal("unauthorized caller accessed witness or proved")
+			if calls.Load() != 0 {
+				t.Fatal("unauthorized caller reached the business handler")
 			}
-			if !limiter.TryAcquire() {
-				t.Fatal("unauthorized caller held a proving slot")
-			}
-			limiter.Release()
 		})
 	}
 	client := executionCoordinatorClient(t, ca, address)
@@ -201,14 +160,14 @@ func TestWorkerExecutionMTLSRejectsBeforeWitnessAndProving(t *testing.T) {
 	if err := conn.Invoke(ctx, "/runtime.WorkerService/Unknown", req, &runtimepb.ExecuteJobResponse{}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unknown method: %v", err)
 	}
-	if store.calls.Load() != 0 || len(observer.durations) != 0 {
+	if calls.Load() != 0 {
 		t.Fatal("unknown method had task side effects")
 	}
 	// Authentication cannot bypass strict Worker-side payload validation.
-	req.Payload = `{"witness_ref":"secret-001","digest":"1","secret":42}`
+	req.Payload = "invalid duration"
 	response, err := client.ExecuteJob(ctx, req)
-	if err != nil || response.GetStatus() != "Failed" || store.calls.Load() != 0 || len(observer.durations) != 0 {
-		t.Fatal("authorized malformed payload reached witness/proving")
+	if err != nil || response.GetStatus() != "failed" || response.GetError() == "" || calls.Load() != 1 {
+		t.Fatal("authorized malformed payload did not return a task failure")
 	}
 }
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,7 +11,6 @@ import (
 
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
 	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -126,18 +123,9 @@ func TestWorkerHeartbeatCancellationClosesConnection(t *testing.T) {
 
 func workerTestConfig(t *testing.T, ca *testpki.CA, address string) workerConfig {
 	t.Helper()
-	dir := t.TempDir()
-	pk, vk := filepath.Join(dir, "proving.key"), filepath.Join(dir, "verifying.key")
-	if err := zk.GeneratePreimageSetup(pk, vk); err != nil {
-		t.Fatal(err)
-	}
-	witness := filepath.Join(dir, "witnesses.json")
-	if err := os.WriteFile(witness, []byte(`{"secret-001":42}`), 0600); err != nil {
-		t.Fatal(err)
-	}
 	files := ca.Issue(t, testpki.Worker, nil)
 	return workerConfig{ID: "worker-a", ListenAddress: "127.0.0.1:0", AdvertiseAddress: "localhost:50051", CoordinatorAddress: address,
-		ProvingKeyPath: pk, WitnessFilePath: witness, MetricsAddress: "127.0.0.1:0", MaxConcurrentProofs: 1, ShutdownTimeout: 2 * time.Second,
+		MetricsAddress: "127.0.0.1:0", ShutdownTimeout: 2 * time.Second,
 		Security: rpcauth.CoordinatorClientConfig{CertFile: files.Cert, KeyFile: files.Key, CAFile: files.CA, ServerIdentity: testpki.Coordinator}}
 }
 

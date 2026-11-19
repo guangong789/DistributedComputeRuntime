@@ -358,35 +358,6 @@ func TestSubmitUncertainCreatePreservedAndRecovered(t *testing.T) {
 	}
 }
 
-func TestSubmitLegacyZKDuplicateComparisonIsReadOnly(t *testing.T) {
-	for _, backend := range []string{"memory", "sqlite"} {
-		t.Run(backend, func(t *testing.T) {
-			store := newCreationTestStore(t, backend)
-			original := creationTestRecord()
-			original.TaskType, original.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
-			if err := store.Save(original); err != nil {
-				t.Fatal(err)
-			}
-			s := &CoordinatorServer{jobStore: store}
-			for _, payload := range []string{original.Payload, `{"witness_ref":"ref","digest":"1"}`} {
-				req := admissionRequest(original)
-				req.Payload = payload
-				r, err := s.SubmitJob(context.Background(), req)
-				if r != nil || status.Code(err) != codes.AlreadyExists || !strings.Contains(err.Error(), errJobAlreadyAdmitted.Error()) {
-					t.Fatalf("equivalent legacy duplicate: %v %v", r, err)
-				}
-				assertRecoveryRecord(t, store, original)
-			}
-			canonical := original
-			canonical.Payload = `{"witness_ref":"ref","digest":"1"}`
-			if err := store.Save(canonical); !errors.Is(err, ErrJobSpecConflict) {
-				t.Fatalf("admission equivalence weakened Save: %v", err)
-			}
-			assertRecoveryRecord(t, store, original)
-		})
-	}
-}
-
 func TestSubmitTerminalDuplicateAcrossSQLiteReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	store, err := NewSQLiteJobStore(path)

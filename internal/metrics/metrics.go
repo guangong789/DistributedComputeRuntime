@@ -36,7 +36,6 @@ const (
 	AttemptLeaseExpired     AttemptOutcome = "lease_expired"
 	AttemptCancelled        AttemptOutcome = "cancelled"
 	AttemptFenced           AttemptOutcome = "fenced"
-	AttemptProofRejected    AttemptOutcome = "proof_rejected"
 	AttemptTaskFailed       AttemptOutcome = "task_failed"
 	AttemptTaskCancelled    AttemptOutcome = "task_cancelled"
 	AttemptInvalidStatus    AttemptOutcome = "invalid_status"
@@ -47,7 +46,6 @@ type AttemptRejectReason string
 
 const (
 	RejectFencing AttemptRejectReason = "fencing"
-	RejectProof   AttemptRejectReason = "proof"
 )
 
 type WorkerState string
@@ -103,7 +101,7 @@ const (
 // Metrics may be called concurrently. Implementations must be concurrency-safe,
 // fast, non-blocking, and must not panic. Callbacks have no error return and must
 // not influence runtime decisions. Arguments deliberately exclude identities,
-// task payloads, witnesses, proofs, and raw error messages.
+// task payloads and raw error messages.
 //
 // AttemptFinished includes the attempt duration; RecoveryPass includes the pass
 // duration. A timeout is represented by WorkerStateChanged with WorkerTimeout,
@@ -121,8 +119,6 @@ type Metrics interface {
 	RecoveryTransition(RecoveryTransitionCause)
 	RecoveryExecutionFailed(RecoveryFailureReason)
 	RecoveryRepairFailed(RecoveryRepairStage)
-	ObserveZKProving(time.Duration)
-	ObserveZKVerification(time.Duration)
 }
 
 type NoopMetrics struct{}
@@ -141,8 +137,6 @@ func (NoopMetrics) RecoveryPass(RecoveryPassOutcome, time.Duration) {}
 func (NoopMetrics) RecoveryTransition(RecoveryTransitionCause)      {}
 func (NoopMetrics) RecoveryExecutionFailed(RecoveryFailureReason)   {}
 func (NoopMetrics) RecoveryRepairFailed(RecoveryRepairStage)        {}
-func (NoopMetrics) ObserveZKProving(time.Duration)                  {}
-func (NoopMetrics) ObserveZKVerification(time.Duration)             {}
 
 // Resolve supplies the default without mutating shared runtime configuration.
 // Configure a non-nil implementation before serving; a typed nil is not a valid

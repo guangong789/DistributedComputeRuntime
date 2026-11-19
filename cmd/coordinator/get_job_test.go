@@ -59,13 +59,13 @@ func TestGetJobPersistedSnapshots(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					r := JobRecord{JobID: int64(12000 + index), State: tc.state, AttemptID: tc.attempt, WorkerID: tc.worker,
-						TaskType: "zk_preimage_prove", Payload: ` { "digest":"+001", "witness_ref":"PRIVATE_MARKER" } `, TimeoutMs: 1500,
+						TaskType: "hash", Payload: "PRIVATE_MARKER", TimeoutMs: 1500,
 						HasWorkerResult: tc.present, Output: tc.output, Error: tc.message}
 					if ok, err := inner.Create(r); !ok || err != nil {
 						t.Fatalf("Create=%v, %v", ok, err)
 					}
 					loads := 0
-					s := &CoordinatorServer{zkDisabled: true, jobStore: &recoveryPassStore{JobStore: inner, load: func(id int64) (JobRecord, bool, error) { loads++; return inner.Load(id) }}}
+					s := &CoordinatorServer{jobStore: &recoveryPassStore{JobStore: inner, load: func(id int64) (JobRecord, bool, error) { loads++; return inner.Load(id) }}}
 					got, err := s.GetJob(context.Background(), &runtimepb.GetJobRequest{JobId: r.JobID})
 					if err != nil {
 						t.Fatal(err)

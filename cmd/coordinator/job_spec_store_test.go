@@ -70,18 +70,18 @@ func TestJobStoreSaveDoesNotNormalizeSpec(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			store := newCreationTestStore(t, backend)
 			original := creationTestRecord()
-			original.TaskType = "zk_preimage_prove"
-			original.Payload = ` { "digest":"+001", "witness_ref":"ref" } `
+			original.TaskType = "hash"
+			original.Payload = `  original input  `
 			if err := store.Save(original); err != nil {
 				t.Fatal(err)
 			}
 			incoming := original
-			incoming.Payload = `{"witness_ref":"ref","digest":"1"}`
+			incoming.Payload = `original input`
 			if err := store.Save(incoming); !errors.Is(err, ErrJobSpecConflict) {
 				t.Fatalf("normalization changed stored spec: %v", err)
 			}
 			incoming = original
-			incoming.TaskType = "ZK_PREIMAGE_PROVE"
+			incoming.TaskType = "HASH"
 			if err := store.Save(incoming); !errors.Is(err, ErrJobSpecConflict) {
 				t.Fatalf("case folding changed stored spec: %v", err)
 			}

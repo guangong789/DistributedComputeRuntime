@@ -7,9 +7,6 @@ import (
 	"math"
 	"testing"
 	"time"
-
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 )
 
 func TestTaskTimeoutFromMilliseconds(t *testing.T) {
@@ -92,51 +89,4 @@ func TestExecuteJobStrictResultDeadline(t *testing.T) {
 	if result.Status != JobSucceeded || result.Output != "committed" || result.Err != nil {
 		t.Fatal("post-finalization cancellation revised a completed local result")
 	}
-}
-
-type finalizationMetrics struct {
-	metrics.NoopMetrics
-	observe func()
-}
-
-func (m finalizationMetrics) ObserveZKProving(time.Duration) { m.observe() }
-
-func TestZKPreimageTaskDeadlineBetweenProveAndOutputFinalization(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-	store := NewMemoryWitnessStore()
-	store.Put("ref", 42)
-	limiter, err := NewProvingLimiter(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	calls, samples := 0, 0
-	task := ZKPreimageTask{
-		Payload: preimageTaskPayload(t, "ref", "123"), WitnessStore: store, Limiter: limiter,
-		Prover: metricTestProver{prove: func(int64, fr.Element) ([]byte, error) {
-			calls++
-			if ctx.Err() != nil {
-				t.Fatal("Prove must complete before expiry")
-			}
-			return []byte("proof"), nil
-		}},
-		Metrics: finalizationMetrics{observe: func() {
-			samples++
-			// The production observation is after Prove and before encoding.
-			// Hold this checkpoint until the actual deadline, without sleeping.
-			<-ctx.Done()
-			if limiter.TryAcquire() {
-				limiter.Release()
-				t.Fatal("premature permit release")
-			}
-		}},
-	}
-	output, err := task.Execute(ctx)
-	if output != "" || !errors.Is(err, context.DeadlineExceeded) || calls != 1 || samples != 1 {
-		t.Fatalf("output=%q error=%v calls=%d samples=%d", output, err, calls, samples)
-	}
-	if !limiter.TryAcquire() {
-		t.Fatal("finalization leaked permit")
-	}
-	limiter.Release()
 }

@@ -266,27 +266,6 @@ func (s *CoordinatorServer) persistSubmitFailure(ctx context.Context, jobID, ini
 	return true, nil
 }
 
-// Called after store initialization, before any startup recovery writes or producers.
-// Inspect all unfinished states even after a match; never parse legacy payloads.
-func (s *CoordinatorServer) checkDisabledZKRecovery() error {
-	unfinished := false
-	for _, state := range []JobState{JobRunning, JobRecovering, JobQueued} {
-		records, err := s.jobStore.ListByState(state)
-		if err != nil {
-			return fmt.Errorf("check unfinished ZK jobs: %w", err)
-		}
-		for _, record := range records {
-			if record.TaskType == "zk_preimage_prove" {
-				unfinished = true
-			}
-		}
-	}
-	if unfinished {
-		return errors.New("ZK is disabled but unfinished ZK jobs exist; restart with ZK enabled")
-	}
-	return nil
-}
-
 func (s *CoordinatorServer) recoverRunningJobs() error {
 	observer := metrics.Resolve(s.metrics)
 	if s.jobStore == nil {
@@ -299,10 +278,8 @@ func (s *CoordinatorServer) recoverRunningJobs() error {
 	}
 
 	for _, record := range records {
-		_, err := validateJobSpec(jobSpecFromRecord(record))
-		if err != nil {
-			// Keep unsafe legacy rows untouched for explicit operator correction.
-			// Neither redispatch nor resave their original potentially private JSON.
+		if err := validateJobSpec(jobSpecFromRecord(record)); err != nil {
+			// Preserve invalid legacy rows for operator correction.
 			fmt.Printf("startup recovery rejected job %d: invalid job specification\n", record.JobID)
 			continue
 		}

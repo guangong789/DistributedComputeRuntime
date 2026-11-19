@@ -19,6 +19,7 @@ import (
 func TestHTTPHandlerUsesSuppliedRegistry(t *testing.T) {
 	backend, registry := newTestBackend(t)
 	backend.JobSubmitted(metrics.SourceSubmit)
+	backend.ObserveJobExecution(metrics.SourceSubmit, time.Millisecond)
 	server := httptest.NewServer(Handler(registry))
 	defer server.Close()
 	client := &http.Client{Timeout: time.Second}
@@ -33,7 +34,7 @@ func TestHTTPHandlerUsesSuppliedRegistry(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK ||
 		!strings.Contains(string(body), `dzkr_jobs_submitted_total{source="submit"} 1`) ||
-		!strings.Contains(string(body), "dzkr_zk_verification_duration_seconds") {
+		!strings.Contains(string(body), "dzkr_job_execution_duration_seconds") {
 		t.Fatalf("metrics response: status=%d body=%s", resp.StatusCode, body)
 	}
 	respOther, err := client.Get(server.URL + "/other")

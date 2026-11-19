@@ -31,8 +31,6 @@ func TestResolveNoopSupportsConcurrentCalls(t *testing.T) {
 			observer.RecoveryTransition(RecoveryRepair)
 			observer.RecoveryExecutionFailed(FailureUnavailable)
 			observer.RecoveryRepairFailed(RepairSave)
-			observer.ObserveZKProving(time.Millisecond)
-			observer.ObserveZKVerification(time.Millisecond)
 		}()
 	}
 	wg.Wait()

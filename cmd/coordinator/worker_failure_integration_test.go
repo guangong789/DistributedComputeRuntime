@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net"
 	"path/filepath"
 	"reflect"
@@ -11,7 +13,6 @@ import (
 	"time"
 
 	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
 )
@@ -139,28 +140,35 @@ type workerFailureResult struct {
 	err  error
 }
 
-func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
+const workerFailureTimeoutMs int64 = 1000
+
+func workerFailureRecord(jobID, attemptID int64, workerID string, state JobState, payload string) JobRecord {
+	return JobRecord{JobID: jobID, AttemptID: attemptID, WorkerID: workerID, State: state,
+		TaskType: "hash", Payload: payload, TimeoutMs: workerFailureTimeoutMs}
+}
+
+func hashResult(payload string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+}
+
+func executeHashJob(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	result := runtime.ExecuteJob(taskCtx, runtime.Job{ID: int(req.JobId), Task: runtime.HashTask{Input: req.Payload}})
+	resp := &runtimepb.ExecuteJobResponse{
+		JobId: req.JobId, AttemptId: req.AttemptId, Status: result.Status.String(), Output: result.Output,
+	}
+	if result.Err != nil {
+		resp.Error = result.Err.Error()
+	}
+	return resp, nil
+}
+
+func TestInFlightWorkerStopRetriesOnSecondWorker(t *testing.T) {
 	const jobID int64 = 8101
-	dir := t.TempDir()
-	provingKey := filepath.Join(dir, "proving.key")
-	verifyingKey := filepath.Join(dir, "verifying.key")
-	if err := zk.GeneratePreimageSetup(provingKey, verifyingKey); err != nil {
-		t.Fatalf("generate preimage setup: %v", err)
-	}
-	prover, err := zk.LoadPreimageProver(provingKey)
-	if err != nil {
-		t.Fatalf("load preimage prover: %v", err)
-	}
-	realVerifier, err := zk.LoadPreimageVerifier(verifyingKey)
-	if err != nil {
-		t.Fatalf("load preimage verifier: %v", err)
-	}
-	verifier := &observedPreimageVerifier{verifier: realVerifier}
-	witnesses := runtime.NewMemoryWitnessStore()
-	witnesses.Put("secret-001", 42)
-	payload := preimagePublicPayload(zk.ComputePreimageDigest(42))
+	const payload = "reliable compute fixture"
 	store := newWorkerFailureStore(t)
-	coordinator := &CoordinatorServer{jobStore: store, preimageVerifier: verifier}
+	coordinator := &CoordinatorServer{jobStore: store}
 	client := startTestCoordinator(t, coordinator)
 
 	firstStarted := make(chan int64, 1)
@@ -179,20 +187,11 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 		func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 			secondCalls.Add(1)
 			secondStarted <- req.AttemptId
-			if req.JobId != jobID || req.AttemptId != 2 || req.TaskType != "zk_preimage_prove" ||
-				req.Payload != payload || req.TimeoutMs != preimageTestTimeoutMs {
+			if req.JobId != jobID || req.AttemptId != 2 || req.TaskType != "hash" ||
+				req.Payload != payload || req.TimeoutMs != workerFailureTimeoutMs {
 				t.Errorf("unexpected retry request: %+v", req)
 			}
-			task := runtime.ZKPreimageTask{Payload: req.Payload, Prover: prover, WitnessStore: witnesses}
-			result := runtime.ExecuteJob(ctx, runtime.Job{ID: int(req.JobId), Task: task, Status: runtime.JobRunning})
-			errText := ""
-			if result.Err != nil {
-				errText = result.Err.Error()
-			}
-			return &runtimepb.ExecuteJobResponse{
-				JobId: int64(result.JobID), AttemptId: req.AttemptId,
-				Status: result.Status.String(), Output: result.Output, Error: errText,
-			}, nil
+			return executeHashJob(ctx, req)
 		})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -200,7 +199,7 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
 		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
-			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
+			JobId: jobID, TaskType: "hash", Payload: payload, TimeoutMs: workerFailureTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
 	}()
@@ -238,20 +237,19 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 		t.Fatal("retry submission did not finish")
 	}
 	if accepted == nil || accepted.JobId != jobID || accepted.AttemptId != 2 ||
-		accepted.Status != "Succeeded" || accepted.Error != "" {
+		accepted.Status != "Succeeded" || accepted.Error != "" || accepted.Output != hashResult(payload) {
 		t.Fatalf("unexpected accepted response: %+v", accepted)
 	}
-	if firstCalls.Load() != 1 || secondCalls.Load() != 1 || verifier.calls.Load() != 1 {
-		t.Fatalf("calls: worker-1=%d worker-2=%d verifier=%d, want 1 each",
-			firstCalls.Load(), secondCalls.Load(), verifier.calls.Load())
+	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+		t.Fatalf("calls: worker-1=%d worker-2=%d, want 1 each", firstCalls.Load(), secondCalls.Load())
 	}
 	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
-		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-2", JobRunning, payload),
-		withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, ""),
+		workerFailureRecord(jobID, 1, "worker-1", JobRunning, payload),
+		workerFailureRecord(jobID, 2, "worker-2", JobRunning, payload),
+		withWorkerResult(workerFailureRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, ""),
 	})
 	record, ok, err := store.Load(jobID)
-	if err != nil || !ok || record != withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, "") {
+	if err != nil || !ok || record != withWorkerResult(workerFailureRecord(jobID, 2, "worker-2", JobSucceeded, payload), accepted.Output, "") {
 		t.Fatalf("durable result=%+v found=%v error=%v", record, ok, err)
 	}
 	if coordinator.isLeaseCurrent(jobID, 1) {
@@ -259,15 +257,14 @@ func TestInFlightWorkerStopRetriesPreimageOnSecondWorker(t *testing.T) {
 	}
 }
 
-func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
+func TestLateWorkerResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 	const jobID int64 = 8102
-	validOutput, digest, realVerifier := preimageProofFixture(t)
-	payload := preimagePublicPayload(digest)
+	const payload = "reliable compute fixture"
+	validOutput, lateOutput := hashResult(payload), "stale output"
 	store := newWorkerFailureStore(t)
-	verifier := &observedPreimageVerifier{verifier: realVerifier}
 	dispatchDone := make(chan int64, 2)
 	coordinator := &CoordinatorServer{
-		jobStore: store, preimageVerifier: verifier,
+		jobStore:       store,
 		leaseDuration:  250 * time.Millisecond,
 		onDispatchDone: func(_ int64, attemptID int64) { dispatchDone <- attemptID },
 	}
@@ -287,7 +284,7 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 			<-releaseFirst
 			return &runtimepb.ExecuteJobResponse{
 				JobId: req.JobId, AttemptId: req.AttemptId,
-				Status: "Succeeded", Output: validOutput,
+				Status: "Succeeded", Output: lateOutput,
 			}, nil
 		},
 		grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -313,7 +310,7 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
 		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
-			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
+			JobId: jobID, TaskType: "hash", Payload: payload, TimeoutMs: workerFailureTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
 	}()
@@ -345,8 +342,8 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 		t.Fatal("retry submission did not finish")
 	}
 	if accepted == nil || accepted.AttemptId != 2 || accepted.Status != "Succeeded" ||
-		accepted.Output != validOutput || verifier.calls.Load() != 1 {
-		t.Fatalf("accepted result=%+v verifier calls=%d", accepted, verifier.calls.Load())
+		accepted.Output != validOutput {
+		t.Fatalf("accepted result=%+v", accepted)
 	}
 	select {
 	case <-lateReturned:
@@ -370,7 +367,7 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 	select {
 	case late := <-lateReturned:
 		if late.JobId != jobID || late.AttemptId != 1 || late.Status != "Succeeded" ||
-			late.Output != validOutput {
+			late.Output != lateOutput {
 			t.Fatalf("unexpected late result: %+v", late)
 		}
 		if coordinator.isLeaseCurrent(late.JobId, late.AttemptId) {
@@ -379,24 +376,23 @@ func TestLatePreimageResultAfterRetryCannotOverwriteSQLite(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("worker-1 did not return its delayed success")
 	}
-	if verifier.calls.Load() != 1 || firstCalls.Load() != 1 || secondCalls.Load() != 1 {
-		t.Fatalf("calls: verifier=%d worker-1=%d worker-2=%d",
-			verifier.calls.Load(), firstCalls.Load(), secondCalls.Load())
+	if firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+		t.Fatalf("calls: worker-1=%d worker-2=%d", firstCalls.Load(), secondCalls.Load())
 	}
 	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
-		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-2", JobRunning, payload),
-		withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, ""),
+		workerFailureRecord(jobID, 1, "worker-1", JobRunning, payload),
+		workerFailureRecord(jobID, 2, "worker-2", JobRunning, payload),
+		withWorkerResult(workerFailureRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, ""),
 	})
 	record, ok, err := store.Load(jobID)
-	if err != nil || !ok || record != withWorkerResult(preimageRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, "") {
+	if err != nil || !ok || record != withWorkerResult(workerFailureRecord(jobID, 2, "worker-2", JobSucceeded, payload), validOutput, "") {
 		t.Fatalf("late result changed durable record=%+v found=%v error=%v", record, ok, err)
 	}
 }
 
 func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 	const jobID int64 = 8103
-	payload := preimagePublicPayload(zk.ComputePreimageDigest(42))
+	const payload = "reliable compute fixture"
 	store := newWorkerFailureStore(t)
 	coordinator := &CoordinatorServer{jobStore: store}
 	client := startTestCoordinator(t, coordinator)
@@ -417,7 +413,7 @@ func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 	submitted := make(chan workerFailureResult, 1)
 	go func() {
 		resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
-			JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: preimageTestTimeoutMs,
+			JobId: jobID, TaskType: "hash", Payload: payload, TimeoutMs: workerFailureTimeoutMs,
 		})
 		submitted <- workerFailureResult{resp: resp, err: err}
 	}()
@@ -447,12 +443,12 @@ func TestInFlightWorkerStopWithoutBackupNeverPersistsSuccess(t *testing.T) {
 		t.Fatalf("stopped worker handled %d calls, want 1", calls.Load())
 	}
 	assertAdmittedWorkerFailureSaves(t, store, []JobRecord{
-		preimageRecord(jobID, 1, "worker-1", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-1", JobRunning, payload),
-		preimageRecord(jobID, 2, "worker-1", JobFailed, payload),
+		workerFailureRecord(jobID, 1, "worker-1", JobRunning, payload),
+		workerFailureRecord(jobID, 2, "worker-1", JobRunning, payload),
+		workerFailureRecord(jobID, 2, "worker-1", JobFailed, payload),
 	})
 	record, ok, err := store.Load(jobID)
-	if err != nil || !ok || record != preimageRecord(jobID, 2, "worker-1", JobFailed, payload) {
+	if err != nil || !ok || record != workerFailureRecord(jobID, 2, "worker-1", JobFailed, payload) {
 		t.Fatalf("failed job durable record=%+v found=%v error=%v", record, ok, err)
 	}
 }

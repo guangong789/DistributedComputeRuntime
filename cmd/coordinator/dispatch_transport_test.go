@@ -7,14 +7,12 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
@@ -34,15 +32,12 @@ func registerMTLSExecutionWorker(t *testing.T, f *mtlsCoordinator, identity, id,
 
 func TestMTLSDispatchIdentityMismatchRetriesVerifiedWorker(t *testing.T) {
 	f := newMTLSCoordinator(t)
-	fixture := newIntegrationZKFixture(t)
-	f.s.preimageVerifier = fixture.verifier
+	const payload = "reliable compute fixture"
 	var calls atomic.Int32
-	proving := &admissionProvingMetrics{}
-	limiter, err := runtime.NewProvingLimiter(1)
-	if err != nil {
-		t.Fatal(err)
+	execute := func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+		calls.Add(1)
+		return executeHashJob(ctx, req)
 	}
-	execute := limitedPreimageWorker(fixture, limiter, proving, &calls)
 	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, r *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		p, err := rpcauth.AuthenticatePeer(ctx)
 		if err != nil || p.Role() != rpcauth.Coordinator {
@@ -55,17 +50,16 @@ func TestMTLSDispatchIdentityMismatchRetriesVerifiedWorker(t *testing.T) {
 	registerMTLSExecutionWorker(t, f, workerBIdentity, "worker-b", address)
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
 	client := f.observingClient(t, testpki.Client)
-	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 11101, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: preimageTestTimeoutMs})
+	response, err := submitAndObserveForTest(mtlsContext(t), client, &runtimepb.SubmitJobRequest{JobId: 11101, TaskType: "hash", Payload: payload, TimeoutMs: workerFailureTimeoutMs})
 	if err != nil || response.GetStatus() != "Succeeded" || response.GetAttemptId() != 2 {
 		t.Fatalf("expected retry to verified Worker A: %v", err)
 	}
 	assertAdmittedWorkerFailureSaves(t, f.store, []JobRecord{
-		preimageRecord(11101, 1, "worker-b", JobRunning, fixture.payload), preimageRecord(11101, 2, "worker-a", JobRunning, fixture.payload), withWorkerResult(preimageRecord(11101, 2, "worker-a", JobSucceeded, fixture.payload), response.Output, ""),
+		workerFailureRecord(11101, 1, "worker-b", JobRunning, payload), workerFailureRecord(11101, 2, "worker-a", JobRunning, payload), withWorkerResult(workerFailureRecord(11101, 2, "worker-a", JobSucceeded, payload), response.Output, ""),
 	})
-	if calls.Load() != 1 || proving.samples.Load() != 1 || f.observer.count("verification", "") != 1 || f.observer.count("finished", string(metrics.AttemptRPCError)) != 1 || f.observer.count("finished", string(metrics.AttemptAccepted)) != 1 || f.observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 || f.observer.count("terminal", string(metrics.TerminalFailed)) != 0 {
-		t.Fatal("identity mismatch reached execution, became a business failure, or fabricated success/proving metrics")
+	if calls.Load() != 1 || f.observer.count("finished", string(metrics.AttemptRPCError)) != 1 || f.observer.count("finished", string(metrics.AttemptAccepted)) != 1 || f.observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 || f.observer.count("terminal", string(metrics.TerminalFailed)) != 0 {
+		t.Fatal("identity mismatch reached execution, became a business failure, or fabricated success metrics")
 	}
-	assertPublicRecoveryPayload(t, fixture.payload)
 	assertRecoveryOwnershipReleased(t, f.s, 11101)
 }
 
@@ -246,24 +240,21 @@ func TestMTLSReregistrationCannotBypassDispatchIdentity(t *testing.T) {
 	}
 }
 
-func TestMTLSTimedRecoveryAfterProvingCapacityReturns(t *testing.T) {
+func TestMTLSTimedRecoveryAfterWorkerCapacityReturns(t *testing.T) {
 	f := newMTLSCoordinator(t, coordinatorExecutionConfig{ListenAddress: "127.0.0.1:0", AttemptLease: 45 * time.Second, ShutdownTimeout: defaultShutdownTimeout})
-	fixture := newIntegrationZKFixture(t)
-	f.s.preimageVerifier = fixture.verifier
-	record := preimageRecord(11106, 7, "old-worker", JobRecovering, fixture.payload)
+	const payload = "reliable compute fixture"
+	record := workerFailureRecord(11106, 7, "old-worker", JobRecovering, payload)
 	saveRecoveryRecord(t, f.store, record)
-	limiter, err := runtime.NewProvingLimiter(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !limiter.TryAcquire() {
-		t.Fatal("cannot occupy proving capacity")
-	}
-	var release sync.Once
-	t.Cleanup(func() { release.Do(limiter.Release) })
-	proving := &admissionProvingMetrics{}
+	var busy atomic.Bool
+	busy.Store(true)
 	var calls atomic.Int32
-	address := startMTLSBackend(t, f, testpki.Worker, limitedPreimageWorker(fixture, limiter, proving, &calls))
+	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+		calls.Add(1)
+		if busy.Load() {
+			return nil, status.Error(codes.ResourceExhausted, "external compute capacity is full")
+		}
+		return executeHashJob(ctx, req)
+	})
 	worker := registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
 	terminal := make(chan struct{}, 1)
 	var accepted atomic.Bool
@@ -283,7 +274,7 @@ func TestMTLSTimedRecoveryAfterProvingCapacityReturns(t *testing.T) {
 	want.AttemptID = 9
 	want.WorkerID = "worker-a"
 	assertRecoveryRecord(t, f.store, want)
-	if calls.Load() != 2 || proving.samples.Load() != 0 || f.observer.count("terminal", "") != 0 {
+	if calls.Load() != 2 || f.observer.count("terminal", "") != 0 {
 		t.Fatal("busy recovery did not retain two-attempt infrastructure failure semantics")
 	}
 	// Readiness still cannot bypass cooldown, including authenticated revival.
@@ -296,18 +287,18 @@ func TestMTLSTimedRecoveryAfterProvingCapacityReturns(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRecoveryReset(t, c, time.Second)
-	release.Do(limiter.Release)
+	busy.Store(false)
 	beforeRetry := time.Now()
 	c.advance(time.Second)
 	waitRecoverySignal(t, terminal)
 	stop()
 	want.State = JobSucceeded
 	want.AttemptID = 10
-	want = withWorkerResult(want, storedProofOutput(t, f.store, record.JobID, fixture), "")
+	want = withWorkerResult(want, hashResult(payload), "")
 	assertRecoveryRecord(t, f.store, want)
 	lease, ok := f.s.getLease(record.JobID)
-	if !ok || lease.AttemptID != 10 || lease.WorkerID != "worker-a" || calls.Load() != 3 || proving.samples.Load() != 1 || f.observer.count("verification", "") != 1 || f.observer.count("submitted", "") != 0 || len(q.entries) != 0 {
-		t.Fatal("timed recovery changed identity, generation, proof verification, lease or metrics")
+	if !ok || lease.AttemptID != 10 || lease.WorkerID != "worker-a" || calls.Load() != 3 || f.observer.count("submitted", "") != 0 || len(q.entries) != 0 {
+		t.Fatal("timed recovery changed identity, generation, lease or metrics")
 	}
 	if lease.ExpiresAt.Before(beforeRetry.Add(45*time.Second)) || lease.ExpiresAt.After(time.Now().Add(45*time.Second)) {
 		t.Fatal("recovery did not use the configured attempt lease")

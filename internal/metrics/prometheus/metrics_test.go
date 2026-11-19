@@ -87,8 +87,7 @@ func TestSemanticCountersAndLabels(t *testing.T) {
 			func() { backend.AttemptFinished(metrics.SourceSubmit, metrics.AttemptRPCError, time.Millisecond) }},
 		{"dzkr_attempts_rejected_total", map[string]string{"source": "submit", "reason": "fencing"},
 			func() { backend.AttemptRejected(metrics.SourceSubmit, metrics.RejectFencing) }},
-		{"dzkr_attempts_rejected_total", map[string]string{"source": "submit", "reason": "proof"},
-			func() { backend.AttemptRejected(metrics.SourceSubmit, metrics.RejectProof) }},
+
 		{"dzkr_worker_state_transitions_total", map[string]string{"from": "alive", "to": "dead", "cause": "heartbeat_timeout"},
 			func() { backend.WorkerStateChanged(metrics.WorkerAlive, metrics.WorkerDead, metrics.WorkerTimeout) }},
 		{"dzkr_worker_state_transitions_total", map[string]string{"from": "dead", "to": "alive", "cause": "heartbeat"},
@@ -137,8 +136,6 @@ func TestDurationHistogramsUseSecondsAndBuckets(t *testing.T) {
 			func(d time.Duration) { backend.AttemptFinished(metrics.SourceRecovery, metrics.AttemptAccepted, d) }},
 		{"dzkr_recovery_pass_duration_seconds", map[string]string{"outcome": "completed"},
 			func(d time.Duration) { backend.RecoveryPass(metrics.PassCompleted, d) }},
-		{"dzkr_zk_proving_duration_seconds", nil, backend.ObserveZKProving},
-		{"dzkr_zk_verification_duration_seconds", nil, backend.ObserveZKVerification},
 	}
 	for _, tc := range cases {
 		tc.emit(250 * time.Millisecond)
@@ -221,22 +218,12 @@ func TestInvalidEnumsCannotCreateUnboundedLabels(t *testing.T) {
 	backend.RecoveryExecutionFailed(metrics.RecoveryFailureReason(bad))
 	backend.RecoveryRepairFailed(metrics.RecoveryRepairStage(bad))
 	backend.ObserveJobExecution(metrics.SourceSubmit, -time.Second)
-	backend.ObserveZKProving(-time.Second)
-	backend.ObserveZKVerification(-time.Second)
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Only the two unlabeled histograms exist before any valid observations.
-	if len(families) != 2 {
+	if len(families) != 0 {
 		t.Fatalf("invalid input created metric series: %v", families)
-	}
-	for _, family := range families {
-		for _, metric := range family.GetMetric() {
-			if len(metric.GetLabel()) != 0 || metric.GetHistogram().GetSampleCount() != 0 {
-				t.Fatalf("invalid label/duration escaped validation: %v", metric)
-			}
-		}
 	}
 }
 
@@ -260,8 +247,6 @@ func TestConcurrentEmissionAndGather(t *testing.T) {
 				backend.RecoveryTransition(metrics.RecoveryRepair)
 				backend.RecoveryExecutionFailed(metrics.FailureUnavailable)
 				backend.RecoveryRepairFailed(metrics.RepairSave)
-				backend.ObserveZKProving(time.Millisecond)
-				backend.ObserveZKVerification(time.Millisecond)
 			}
 		}()
 	}
@@ -302,8 +287,6 @@ func TestConcurrentEmissionAndGather(t *testing.T) {
 		{"dzkr_job_execution_duration_seconds", map[string]string{"source": "submit"}},
 		{"dzkr_attempt_duration_seconds", map[string]string{"source": "submit", "outcome": "accepted"}},
 		{"dzkr_recovery_pass_duration_seconds", map[string]string{"outcome": "completed"}},
-		{"dzkr_zk_proving_duration_seconds", nil},
-		{"dzkr_zk_verification_duration_seconds", nil},
 	} {
 		got := readSample(t, registry, tc.name, tc.labels)
 		if got.count != uint64(want) || math.Abs(got.sum-want/1000) > 1e-9 {

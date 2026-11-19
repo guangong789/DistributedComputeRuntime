@@ -11,9 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
@@ -176,24 +174,19 @@ func TestWorkerShutdownAdmissionAndContexts(t *testing.T) {
 }
 
 func TestWorkerDrainingRejectsBeforeBusiness(t *testing.T) {
-	prover, _ := newTestPreimageProver(t)
-	inner := runtime.NewMemoryWitnessStore()
-	inner.Put("secret-001", 42)
-	witness := &observedWitnessStore{store: inner}
-	limiter := newTestProvingLimiter(t)
-	observer := &workerProvingMetrics{durations: make(chan time.Duration, 1)}
-	p, client := shutdownWorker(t, &WorkerService{preimageProver: prover, witnessStore: witness, provingLimiter: limiter, metrics: observer}, time.Second)
+	var calls atomic.Int32
+	worker := &WorkerService{}
+	p, client := shutdownWorker(t, shutdownExecutionService{execute: func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+		calls.Add(1)
+		return worker.ExecuteJob(ctx, req)
+	}}, time.Second)
 	p.lifecycle.beginShutdown() // Leave transport open to test application rejection.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	resp, err := client.ExecuteJob(ctx, &runtimepb.ExecuteJobRequest{JobId: 12001, AttemptId: 1, TaskType: "zk_preimage_prove", Payload: preimageTestPayload(t, "secret-001", fr.Element{}), TimeoutMs: 1000})
-	if resp != nil || status.Code(err) != codes.Unavailable || witness.calls.Load() != 0 || len(observer.durations) != 0 {
+	resp, err := client.ExecuteJob(ctx, &runtimepb.ExecuteJobRequest{JobId: 12001, AttemptId: 1, TaskType: "hash", Payload: "input", TimeoutMs: 1000})
+	if resp != nil || status.Code(err) != codes.Unavailable || calls.Load() != 0 {
 		t.Fatalf("draining entered business: %v", err)
 	}
-	if !limiter.TryAcquire() {
-		t.Fatal("rejected request acquired capacity")
-	}
-	limiter.Release()
 }
 
 func TestWorkerShutdownCancelsRealTask(t *testing.T) {
@@ -224,153 +217,6 @@ func TestWorkerShutdownCancelsRealTask(t *testing.T) {
 	// Response delivery races transport Stop; the local task must be Cancelled
 	// regardless of whether the caller receives that result or a transport error.
 	awaitWorker(t, result)
-}
-
-type shutdownProver struct {
-	entered chan struct{}
-	release <-chan struct{}
-	calls   atomic.Int32
-}
-
-func (p *shutdownProver) Prove(int64, fr.Element) ([]byte, error) {
-	p.calls.Add(1)
-	close(p.entered)
-	<-p.release
-	return []byte("controlled proof"), nil
-}
-
-// Snapshot the last pre-Prove Err check before cancellation, then let that check
-// return its snapshot afterward. Production ZKPreimageTask remains unchanged.
-type provingCheckpointContext struct {
-	context.Context
-	reached chan struct{}
-	release <-chan struct{}
-	once    sync.Once
-}
-
-func (c *provingCheckpointContext) Err() error {
-	err := c.Context.Err()
-	c.once.Do(func() { close(c.reached); <-c.release })
-	return err
-}
-
-func TestWorkerShutdownProvingOwnership(t *testing.T) {
-	for _, name := range []string{"clean", "deadline", "pre-admitted checkpoint race"} {
-		t.Run(name, func(t *testing.T) {
-			proofRelease, handlerRelease, checkpointRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			var proofOnce, handlerOnce, checkpointOnce sync.Once
-			unblock := func() {
-				checkpointOnce.Do(func() { close(checkpointRelease) })
-				proofOnce.Do(func() { close(proofRelease) })
-				handlerOnce.Do(func() { close(handlerRelease) })
-			}
-			prover := &shutdownProver{entered: make(chan struct{}), release: proofRelease}
-			limiter := newTestProvingLimiter(t)
-			witnesses := runtime.NewMemoryWitnessStore()
-			witnesses.Put("secret-001", 42)
-			cancelled, proofFinished, handlerFinished, checkpoint := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
-			localResult := make(chan runtime.Result, 1)
-			handlerContext := make(chan context.Context, 1)
-			service := shutdownExecutionService{execute: func(ctx context.Context, r *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
-				defer close(handlerFinished)
-				handlerContext <- ctx
-				var taskCtx context.Context = ctx
-				if name == "pre-admitted checkpoint race" {
-					taskCtx = &provingCheckpointContext{Context: ctx, reached: checkpoint, release: checkpointRelease}
-				}
-				task := runtime.ZKPreimageTask{Payload: r.Payload, Prover: prover, WitnessStore: witnesses, Limiter: limiter}
-				result := runtime.ExecuteJob(taskCtx, runtime.Job{ID: int(r.JobId), Task: task})
-				localResult <- result
-				close(proofFinished)
-				<-ctx.Done()
-				close(cancelled)
-				<-handlerRelease
-				return &runtimepb.ExecuteJobResponse{JobId: r.JobId, AttemptId: r.AttemptId, Status: result.Status.String(), Output: result.Output}, nil
-			}}
-			budget := 2 * time.Second
-			if name == "deadline" {
-				budget = 60 * time.Millisecond
-			}
-			p, client := shutdownWorker(t, service, budget)
-			t.Cleanup(unblock) // Release before fixture joins on any assertion failure.
-			var cleaned atomic.Bool
-			p.shutdownMetrics = func(context.Context) error { cleaned.Store(true); return nil }
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			response := make(chan error, 1)
-			go func() {
-				_, err := client.ExecuteJob(ctx, &runtimepb.ExecuteJobRequest{JobId: 12002, AttemptId: 1, TaskType: "zk_preimage_prove", Payload: preimageTestPayload(t, "secret-001", fr.Element{}), TimeoutMs: 5000})
-				response <- err
-			}()
-			if name == "pre-admitted checkpoint race" {
-				awaitWorker(t, checkpoint)
-			} else {
-				awaitWorker(t, prover.entered)
-			}
-			stopped := make(chan error, 1)
-			go func() { stopped <- p.shutdown() }()
-			awaitWorker(t, p.lifecycle.ctx.Done())
-			awaitWorker(t, awaitWorker(t, handlerContext).Done())
-			// Cancellation does not mean Stop has completed. Keep execution blocked
-			// until the caller observes transport failure, then release proving.
-			if err := awaitWorker(t, response); err == nil {
-				t.Fatal("blocked handler returned a successful response")
-			}
-			awaitWorker(t, p.serveDone)
-			if name == "pre-admitted checkpoint race" {
-				checkpointOnce.Do(func() { close(checkpointRelease) })
-				awaitWorker(t, prover.entered)
-			}
-			if limiter.TryAcquire() {
-				limiter.Release()
-				t.Fatal("shutdown released active proof permit")
-			}
-			select {
-			case <-p.lifecycle.done:
-				t.Fatal("cancellation counted as handler completion")
-			default:
-			}
-			if cleaned.Load() {
-				t.Fatal("cleanup before computation completed")
-			}
-			if name == "deadline" {
-				err := awaitWorker(t, stopped)
-				if !errors.Is(err, errWorkerShutdownIncomplete) || !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("timeout=%v", err)
-				}
-			}
-			proofOnce.Do(func() { close(proofRelease) })
-			awaitWorker(t, proofFinished)
-			awaitWorker(t, cancelled)
-			result := awaitWorker(t, localResult)
-			if result.Output != "" || result.Status != runtime.JobCancelled || !errors.Is(result.Err, context.Canceled) {
-				t.Fatalf("late proof escaped cancellation: %+v", result)
-			}
-			if !limiter.TryAcquire() {
-				t.Fatal("finished task retained capacity")
-			}
-			limiter.Release()
-			select {
-			case <-p.lifecycle.done:
-				t.Fatal("handler completion omitted trailing work")
-			default:
-			}
-			if cleaned.Load() {
-				t.Fatal("cleanup before handler returned")
-			}
-			handlerOnce.Do(func() { close(handlerRelease) })
-			awaitWorker(t, handlerFinished)
-			if name != "deadline" {
-				if err := awaitWorker(t, stopped); err != nil {
-					t.Fatal(err)
-				}
-			}
-			awaitWorker(t, p.cleanupDone)
-			if prover.calls.Load() != 1 || cleaned.Load() != (name != "deadline") {
-				t.Fatal("extra proving or late cleanup after timeout")
-			}
-		})
-	}
 }
 
 func TestWorkerShutdownMetricsBudget(t *testing.T) {

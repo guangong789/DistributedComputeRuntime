@@ -24,11 +24,8 @@ func (s *CoordinatorServer) executeSubmissionForTest(ctx context.Context, req *r
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.checkZKAvailable(req.TaskType); err != nil {
-		return nil, err
-	}
-	spec, err := validateJobSpec(jobSpecFromRequest(req))
-	if err != nil {
+	spec := jobSpecFromRequest(req)
+	if err := validateJobSpec(spec); err != nil {
 		return nil, err
 	}
 	if s.jobStore == nil {

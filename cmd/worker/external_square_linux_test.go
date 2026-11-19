@@ -106,7 +106,7 @@ func externalSquareWorker(t *testing.T, slot *externalcompute.Slot) (*WorkerServ
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &WorkerService{externalSquare: program, zkDisabled: true}, dir
+	return &WorkerService{externalSquare: program}, dir
 }
 
 func externalSquareRequest(payload string, timeoutMS int64) *runtimepb.ExecuteJobRequest {

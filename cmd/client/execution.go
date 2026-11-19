@@ -57,12 +57,8 @@ func submitDemo(ctx context.Context, client runtimepb.CoordinatorServiceClient, 
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.RPCTimeout)
 	defer cancel()
-	payload, err := buildPreimagePayload("secret-001", demoPreimageDigest)
-	if err != nil {
-		return nil, err
-	}
 	return client.SubmitJob(ctx, &runtimepb.SubmitJobRequest{
-		JobId: 3001, TaskType: "zk_preimage_prove", Payload: payload,
+		JobId: 3001, TaskType: "hash", Payload: "Distributed Compute Runtime client",
 		TimeoutMs: c.JobTimeout.Milliseconds(),
 	})
 }

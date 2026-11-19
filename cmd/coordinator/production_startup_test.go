@@ -24,11 +24,10 @@ import (
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
-type nonZKProcessOutput struct {
+type computeProcessOutput struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
 	token  string
@@ -36,7 +35,7 @@ type nonZKProcessOutput struct {
 	once   sync.Once
 }
 
-func (o *nonZKProcessOutput) Write(p []byte) (int, error) {
+func (o *computeProcessOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	n, err := o.buffer.Write(p)
@@ -45,15 +44,15 @@ func (o *nonZKProcessOutput) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-func (o *nonZKProcessOutput) text() string {
+func (o *computeProcessOutput) text() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.buffer.String()
 }
 
-func startNonZKProcess(t *testing.T, ctx context.Context, bin string, args []string, token string) *nonZKProcessOutput {
+func startComputeProcess(t *testing.T, ctx context.Context, bin string, args []string, token string) *computeProcessOutput {
 	t.Helper()
-	out := &nonZKProcessOutput{token: token, ready: make(chan struct{})}
+	out := &computeProcessOutput{token: token, ready: make(chan struct{})}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.WaitDelay = 2 * time.Second
@@ -98,14 +97,14 @@ func startNonZKProcess(t *testing.T, ctx context.Context, bin string, args []str
 	return out
 }
 
-func TestDisableZKProductionStartupMTLS(t *testing.T) {
+func TestComputeProductionStartupMTLS(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("owned process signal cleanup requires Unix")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	dir := t.TempDir()
-	// Offline build only: no setup, proving, benchmarks or deployment fixtures.
+	// Build the real production commands from the offline module cache.
 	buildCtx, stopBuild := context.WithTimeout(ctx, 60*time.Second)
 	defer stopBuild()
 	build := exec.CommandContext(buildCtx, "go", "build", "-mod=readonly", "-p=1", "-o", dir+string(os.PathSeparator), "./cmd/coordinator", "./cmd/worker")
@@ -120,12 +119,12 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	workerFiles := ca.Issue(t, testpki.Worker, nil)
 	clientFiles := ca.Issue(t, testpki.Client, nil)
 	dbPath := filepath.Join(dir, "jobs.db")
-	// Terminal ZK must not block a real disabled startup.
+	// A retired terminal record stays readable after startup.
 	store, err := NewSQLiteJobStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal := JobRecord{JobID: 99, State: JobSucceeded, AttemptID: 7, WorkerID: "old", TaskType: "zk_preimage_prove", Payload: "preserved", TimeoutMs: 1000}
+	terminal := withWorkerResult(JobRecord{JobID: 99, State: JobSucceeded, AttemptID: 7, WorkerID: "old", TaskType: retiredTaskType, Payload: "preserved", TimeoutMs: 1000}, "historical result", "")
 	if err := store.Save(terminal); err != nil {
 		t.Fatal(err)
 	}
@@ -141,9 +140,8 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	missing := filepath.Join(dir, "no-zk-material")
-	coordOut := startNonZKProcess(t, ctx, filepath.Join(dir, "coordinator"), []string{
-		"-disable-zk", "-listen", "127.0.0.1:0", "-db", dbPath, "-verifying-key", missing,
+	coordOut := startComputeProcess(t, ctx, filepath.Join(dir, "coordinator"), []string{
+		"-listen", "127.0.0.1:0", "-db", dbPath,
 		"-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s",
 		"-tls-cert", coordFiles.Cert, "-tls-key", coordFiles.Key, "-tls-ca", coordFiles.CA,
 		"-allow-client", testpki.Client, "-allow-worker", testpki.Worker}, "coordinator mTLS listening on ")
@@ -169,9 +167,9 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	if err := reservation.Close(); err != nil {
 		t.Fatal(err)
 	}
-	startNonZKProcess(t, ctx, filepath.Join(dir, "worker"), []string{
-		"-disable-zk", "-id", "worker-a", "-listen", workerAddress, "-advertise", workerAddress,
-		"-coordinator", coordinatorAddress, "-proving-key", missing, "-witness-file", missing,
+	startComputeProcess(t, ctx, filepath.Join(dir, "worker"), []string{
+		"-id", "worker-a", "-listen", workerAddress, "-advertise", workerAddress,
+		"-coordinator", coordinatorAddress,
 		"-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s",
 		"-tls-cert", workerFiles.Cert, "-tls-key", workerFiles.Key, "-tls-ca", workerFiles.CA}, "worker registered successfully")
 	principal, err := rpcauth.ParsePrincipal(testpki.Client)
@@ -272,37 +270,17 @@ func TestDisableZKProductionStartupMTLS(t *testing.T) {
 	}
 	rpcCtx, stop := context.WithTimeout(ctx, 5*time.Second)
 	defer stop()
-	if _, err := submitAndObserveForTest(rpcCtx, client, &runtimepb.SubmitJobRequest{JobId: 3, TaskType: "zk_preimage_prove", Payload: "PRIVATE_MARKER", TimeoutMs: 1000}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatal("disabled admission", err)
+	if _, err := submitAndObserveForTest(rpcCtx, client, &runtimepb.SubmitJobRequest{JobId: 3, TaskType: retiredTaskType, Payload: "PRIVATE_MARKER", TimeoutMs: 1000}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatal("retired task admission", err)
 	}
 	if _, ok, err := reopened.Load(3); err != nil || ok {
 		t.Fatal("rejected job persisted", err)
 	}
 	assertSQLiteJobRecord(t, reopened, terminal)
-	if _, err := os.Stat(missing); !os.IsNotExist(err) {
-		t.Fatal("unexpected ZK artifact creation", err)
-	}
-	// An enabled Coordinator selecting this disabled real Worker receives a task
-	// failure, not a retryable RPC error. No verifying key is needed for Failed.
-	coordPrincipal, _ := rpcauth.ParsePrincipal(testpki.Coordinator)
-	material, err := rpcauth.LoadMaterial(coordFiles.Cert, coordFiles.Key, coordFiles.CA, coordPrincipal)
+	snapshot, err := client.GetJob(rpcCtx, &runtimepb.GetJobRequest{JobId: terminal.JobID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mismatchStore := NewMemoryJobStore()
-	enabled := &CoordinatorServer{jobStore: mismatchStore, workerCredentials: func(w WorkerInfo) (credentials.TransportCredentials, error) {
-		return material.WorkerCredentials(w.ID, w.Address)
-	}}
-	if _, err := enabled.RegisterWorker(ctx, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: workerAddress}); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := enabled.executeSubmissionForTest(rpcCtx, &runtimepb.SubmitJobRequest{JobId: 4, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"demo","digest":"1"}`, TimeoutMs: 1000})
-	if err != nil || resp.GetStatus() != "Failed" || resp.GetAttemptId() != 1 || resp.GetError() != "ZK tasks are disabled" {
-		t.Fatalf("mismatch=%v error=%v", resp, err)
-	}
-	record, ok, err := mismatchStore.Load(4)
-	if err != nil || !ok || record.State != JobFailed || record.AttemptID != 1 || enabled.jobAttempts[4] != 1 {
-		t.Fatal("mismatch retried or persisted success", record, err)
-	}
-	t.Log("production Coordinator + Worker: mTLS hash/sleep succeeded, SQLite AttemptID=1; ZK rejected without artifacts; mismatched Worker failed at AttemptID=1")
+	assertGetJobSnapshot(t, snapshot, terminal, runtimepb.JobState_JOB_STATE_SUCCEEDED)
+	t.Log("production Coordinator and Worker recovered CPU jobs over mTLS and preserved a retired terminal record")
 }

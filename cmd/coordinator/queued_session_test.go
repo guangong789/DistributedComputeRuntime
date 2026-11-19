@@ -54,7 +54,7 @@ func assertQueuedSessionReleased(t *testing.T, s *CoordinatorServer, jobID int64
 
 func TestQueuedJobExecution(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, task := range []string{"hash", "sleep", "legacy ZK"} {
+		for _, task := range []string{"hash", "sleep", "failed hash"} {
 			t.Run(backend+"/"+task, func(t *testing.T) {
 				s, inner, original := queuedSessionFixture(t, backend)
 				// Give each fixture its final immutable spec before creating it.
@@ -64,15 +64,14 @@ func TestQueuedJobExecution(t *testing.T) {
 				if task == "sleep" {
 					queued.TaskType, queued.Payload, workerStatus, wantState = "sleep", "1ms", "Cancelled", JobCancelled
 				}
-				if task == "legacy ZK" {
-					queued.TaskType, queued.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
-					workerStatus, wantState = "Failed", JobFailed // Failed ZK tasks skip proof verification.
+				if task == "failed hash" {
+					queued.TaskType, queued.Payload = "hash", `  original input  `
+					workerStatus, wantState = "Failed", JobFailed
 				}
 				if created, err := inner.Create(queued); !created || err != nil {
 					t.Fatalf("Create=%v, %v", created, err)
 				}
-				execution, err := validateJobSpec(jobSpecFromRecord(queued))
-				if err != nil {
+				if err := validateJobSpec(jobSpecFromRecord(queued)); err != nil {
 					t.Fatal(err)
 				}
 				observer := &recordingMetrics{}
@@ -97,7 +96,7 @@ func TestQueuedJobExecution(t *testing.T) {
 				var calls atomic.Int32
 				registerTestWorker(t, s, "selected", func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 					calls.Add(1)
-					if req.AttemptId != 1 || req.JobId != queued.JobID || req.TaskType != execution.TaskType || req.Payload != execution.Payload || req.TimeoutMs != execution.TimeoutMs {
+					if req.AttemptId != 1 || req.JobId != queued.JobID || req.TaskType != queued.TaskType || req.Payload != queued.Payload || req.TimeoutMs != queued.TimeoutMs {
 						t.Errorf("incorrect dispatch: %+v", req)
 					}
 					want := queued
@@ -127,7 +126,7 @@ func TestQueuedJobExecution(t *testing.T) {
 
 func TestQueuedJobNoWorkerAndEligibility(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
-		for _, scenario := range []string{"no worker", "missing", "running", "cancelled", "malformed", "invalid timeout", "ZK disabled"} {
+		for _, scenario := range []string{"no worker", "missing", "running", "cancelled", "malformed", "invalid timeout", "retired task"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
 				s, inner, queued := queuedSessionFixture(t, backend)
 				id, wantCode := queued.JobID, codes.FailedPrecondition
@@ -143,15 +142,14 @@ func TestQueuedJobNoWorkerAndEligibility(t *testing.T) {
 					queued.State = JobCancelled
 				case "malformed":
 					queued.Output = "residual"
-				case "invalid timeout", "ZK disabled":
+				case "invalid timeout", "retired task":
 					queued.JobID++
 					id = queued.JobID
 					if scenario == "invalid timeout" {
 						queued.TimeoutMs = 0
 						wantCode = codes.InvalidArgument
 					} else {
-						queued.TaskType = "zk_preimage_prove"
-						s.zkDisabled = true
+						queued.TaskType = retiredTaskType
 					}
 				}
 				if scenario != "missing" {

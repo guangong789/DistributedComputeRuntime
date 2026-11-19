@@ -109,20 +109,24 @@ func TestInvalidLegacyTimeoutPreservedAndRecoveryBacksOff(t *testing.T) {
 	}
 }
 
+// Simulate a task that returns successful output only after its deadline.
+type heldHashTask struct {
+	payload string
+	release <-chan struct{}
+}
+
+func (task heldHashTask) Execute(context.Context) (string, error) {
+	<-task.release
+	return hashResult(task.payload), nil
+}
+
 func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) {
 	f := newMTLSCoordinator(t)
-	fixture := newIntegrationZKFixture(t)
-	f.s.preimageVerifier = fixture.verifier
+	const payload = "deadline test"
 	var calls atomic.Int32
 	release := make(chan struct{})
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	prover := &blockedTransportProver{real: fixture.prover, entered: make(chan struct{}), release: release}
-	limiter, err := runtime.NewProvingLimiter(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proving := &admissionProvingMetrics{}
 	taskContexts := make(chan context.Context, 1)
 	address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		if calls.Add(1) == 1 {
@@ -134,9 +138,11 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 			taskCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			taskContexts <- taskCtx
-			return controlledMTLSProvingWorker(fixture, prover, limiter, proving, nil)(taskCtx, req)
+			result := runtime.ExecuteJob(taskCtx, runtime.Job{ID: int(req.JobId), Task: heldHashTask{payload: req.Payload, release: release}})
+			return &runtimepb.ExecuteJobResponse{JobId: req.JobId, AttemptId: req.AttemptId,
+				Status: result.Status.String(), Output: result.Output, Error: result.Err.Error()}, nil
 		}
-		return fixture.execute(ctx, req, nil)
+		return executeHashJob(ctx, req)
 	})
 	registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
 	ctx := mtlsContext(t)
@@ -144,7 +150,7 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	submissionFinished := make(chan struct{})
 	go func() {
 		defer close(submissionFinished)
-		r, err := f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 12120, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250})
+		r, err := f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: 12120, TaskType: "hash", Payload: payload, TimeoutMs: 250})
 		done <- workerFailureResult{r, err}
 	}()
 	t.Cleanup(func() {
@@ -152,14 +158,9 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 		select {
 		case <-submissionFinished:
 		case <-time.After(5 * time.Second):
-			t.Error("submission did not finish after releasing Prove")
+			t.Error("submission did not finish after releasing the held task")
 		}
 	})
-	select {
-	case <-prover.entered:
-	case <-ctx.Done():
-		t.Fatal("Prove did not start")
-	}
 	var taskCtx context.Context
 	select {
 	case taskCtx = <-taskContexts:
@@ -171,13 +172,9 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	case <-ctx.Done():
 		t.Fatal("task deadline did not expire")
 	}
-	if limiter.TryAcquire() {
-		limiter.Release()
-		t.Fatal("deadline released running proof")
-	}
 	select {
 	case <-done:
-		t.Fatal("deadline falsely completed synchronous Prove")
+		t.Fatal("deadline falsely completed synchronous execution")
 	default:
 	}
 	once.Do(func() { close(release) })
@@ -189,10 +186,10 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	case <-ctx.Done():
 		t.Fatal("late task did not finish")
 	}
-	want := JobRecord{JobID: 12120, State: JobCancelled, AttemptID: 1, WorkerID: "worker-a", TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 250, HasWorkerResult: true, Error: context.DeadlineExceeded.Error()}
+	want := JobRecord{JobID: 12120, State: JobCancelled, AttemptID: 1, WorkerID: "worker-a", TaskType: "hash", Payload: payload, TimeoutMs: 250, HasWorkerResult: true, Error: context.DeadlineExceeded.Error()}
 	assertRecoveryRecord(t, f.store, want)
-	if calls.Load() != 1 || f.observer.count("verification", "") != 0 || f.observer.count("started", "") != 1 || proving.samples.Load() != 1 {
-		t.Fatal("task Cancelled was retried, verified or double-counted")
+	if calls.Load() != 1 || f.observer.count("started", "") != 1 {
+		t.Fatal("task Cancelled was retried or double-counted")
 	}
 	assertRecoveryOwnershipReleased(t, f.s, want.JobID)
 	// A changed budget is now a spec conflict and must preserve the Cancelled result.
@@ -211,7 +208,7 @@ func TestCoordinatorTaskDeadlineCancelledWithoutRetryAndResubmits(t *testing.T) 
 	assertRecoveryOwnershipReleased(t, f.s, want.JobID)
 	// A different logical Job may run with a new relative execution budget.
 	r, err = f.s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: want.JobID + 1, TaskType: want.TaskType, Payload: want.Payload, TimeoutMs: 5000})
-	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 1 || calls.Load() != 2 || f.observer.count("verification", "") != 1 {
+	if err != nil || r.GetStatus() != "Succeeded" || r.GetAttemptId() != 1 || calls.Load() != 2 || r.GetOutput() != hashResult(payload) {
 		t.Fatalf("new job: response=%v error=%v", r, err)
 	}
 	newJob := withWorkerResult(want, r.Output, r.Error)

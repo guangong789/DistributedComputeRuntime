@@ -102,4 +102,4 @@ coupling or prove absence of races outside the tested paths.
   tests or presents an older run as current verification.
 
 Optional CI can invoke the same targets and archive `.test-reports/` after failures.
-No CI service configuration, crypto-fixture sharing, or fixture framework is added.
+No CI service configuration or shared fixture framework is required.

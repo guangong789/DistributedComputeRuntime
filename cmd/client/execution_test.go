@@ -27,7 +27,7 @@ func TestClientExecutionTimeBudgets(t *testing.T) {
 		job, rpc time.Duration
 	}{
 		{"defaults", nil, 5 * time.Second, 30 * time.Second},
-		{"slow proof", []string{"-job-timeout", "40s", "-rpc-timeout", "90s"}, 40 * time.Second, 90 * time.Second},
+		{"long task budget", []string{"-job-timeout", "40s", "-rpc-timeout", "90s"}, 40 * time.Second, 90 * time.Second},
 		{"independent shorter RPC", []string{"-job-timeout", "40s", "-rpc-timeout", "2s"}, 40 * time.Second, 2 * time.Second},
 		{"maximum whole milliseconds", []string{"-job-timeout", "9223372036854ms"}, 9223372036854 * time.Millisecond, 30 * time.Second},
 	} {
@@ -48,8 +48,8 @@ func TestClientExecutionTimeBudgets(t *testing.T) {
 				if !ok || deadline.Before(before.Add(tc.rpc)) || deadline.After(time.Now().Add(tc.rpc)) {
 					t.Fatal("configured RPC duration did not reach SubmitJob context")
 				}
-				payload, _ := buildPreimagePayload("secret-001", demoPreimageDigest)
-				if req.JobId != 3001 || req.TaskType != "zk_preimage_prove" || req.Payload != payload || req.TimeoutMs != tc.job.Milliseconds() {
+				const payload = "Distributed Compute Runtime client"
+				if req.JobId != 3001 || req.TaskType != "hash" || req.Payload != payload || req.TimeoutMs != tc.job.Milliseconds() {
 					t.Fatal("configured task timeout or public demo request changed")
 				}
 				return &runtimepb.SubmitJobResponse{JobId: req.JobId, Status: "Accepted"}, nil

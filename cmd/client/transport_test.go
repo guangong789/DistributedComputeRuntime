@@ -110,11 +110,8 @@ func TestClientMTLSProductionDial(t *testing.T) {
 			defer conn.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			payload, err := buildPreimagePayload("secret-001", demoPreimageDigest)
-			if err != nil {
-				t.Fatal(err)
-			}
-			response, err := runtimepb.NewCoordinatorServiceClient(conn).SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 100, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 5000})
+			const payload = "Distributed Compute Runtime client"
+			response, err := runtimepb.NewCoordinatorServiceClient(conn).SubmitJob(ctx, &runtimepb.SubmitJobRequest{JobId: 100, TaskType: "hash", Payload: payload, TimeoutMs: 5000})
 			if tc.success {
 				if err != nil || response.GetStatus() != "Accepted" || response.GetJobId() != 100 || service.calls.Load() != 1 {
 					t.Fatalf("client production TLS dial: %v", err)
@@ -134,7 +131,7 @@ func TestClientMTLSProductionDial(t *testing.T) {
 				}
 				select {
 				case request := <-service.requests:
-					if request.TimeoutMs != 40000 || request.Payload != payload || request.TaskType != "zk_preimage_prove" {
+					if request.TimeoutMs != 40000 || request.Payload != payload || request.TaskType != "hash" {
 						t.Fatal("configured task timeout did not reach the real mTLS RPC")
 					}
 				case <-ctx.Done():

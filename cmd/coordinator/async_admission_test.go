@@ -76,15 +76,15 @@ func TestAsyncAdmissionWithoutWorker(t *testing.T) {
 					req.TaskType, req.Payload = "sleep", "invalid duration still fails at the Worker"
 				}
 				if i == 2 {
-					req.TaskType, req.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
+					req.TaskType, req.Payload = "hash", `  original input  `
 				}
 				if i == 3 {
 					req.TaskType = "unsupported-workload"
 				} // Preserve existing execution-time validation.
 				response, err := s.SubmitJob(context.Background(), req)
 				assertAdmissionAck(t, response, err, id)
-				spec, err := validateJobSpec(jobSpecFromRequest(req))
-				if err != nil {
+				spec := jobSpecFromRequest(req)
+				if err := validateJobSpec(spec); err != nil {
 					t.Fatal(err)
 				}
 				want := JobRecord{JobID: id, State: JobQueued, TaskType: spec.TaskType, Payload: spec.Payload, TimeoutMs: spec.TimeoutMs}
@@ -313,19 +313,15 @@ func TestAsyncAdmissionShutdownJoinsCreate(t *testing.T) {
 }
 
 func TestAsyncAdmissionValidationPrecedesPersistence(t *testing.T) {
-	for _, req := range []*runtimepb.SubmitJobRequest{nil, {JobId: 1, TaskType: "hash", TimeoutMs: 0}, {JobId: 2, TaskType: "zk_preimage_prove", Payload: `{"secret":"private"}`, TimeoutMs: 1000}} {
+	for _, req := range []*runtimepb.SubmitJobRequest{nil, {JobId: 1, TaskType: "hash", TimeoutMs: 0}, {JobId: 2, TaskType: "external_square", Payload: `{"secret":"private"}`, TimeoutMs: 1000}} {
 		s := &CoordinatorServer{jobStore: &recoveryPassStore{create: func(JobRecord) (bool, error) { t.Fatal("invalid request persisted"); return false, nil }}}
 		if ack, err := s.SubmitJob(context.Background(), req); ack != nil || status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("invalid admission=%v, %v", ack, err)
 		}
 	}
-	s := &CoordinatorServer{zkDisabled: true, jobStore: NewMemoryJobStore()}
-	if ack, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{TaskType: "zk_preimage_prove", TimeoutMs: 1000}); ack != nil || status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("disabled admission=%v, %v", ack, err)
-	}
 	// Existing validation ordering remains: an invalid request does not become
 	// a duplicate merely because the same durable JobID is already present.
-	s = &CoordinatorServer{jobStore: NewMemoryJobStore()}
+	s := &CoordinatorServer{jobStore: NewMemoryJobStore()}
 	saveRecoveryRecord(t, s.jobStore, JobRecord{JobID: 1, State: JobQueued})
 	if _, err := s.SubmitJob(context.Background(), &runtimepb.SubmitJobRequest{JobId: 1, TimeoutMs: 0}); status.Code(err) != codes.InvalidArgument || strings.Contains(err.Error(), "already") {
 		t.Fatalf("validation ordering changed: %v", err)
@@ -368,20 +364,5 @@ func TestAsyncAdmissionMetricsSeparateCreateAndExecution(t *testing.T) {
 	}
 	if observer.count("admission", "") != 1 || observer.count("submitted", "") != 1 || observer.count("execution", "") != 1 || observer.count("started", "") != 1 || observer.count("terminal", string(metrics.TerminalSucceeded)) != 1 {
 		t.Fatalf("execution/admission duplicated: %+v", observer.snapshot())
-	}
-}
-
-func TestAsyncAdmissionQueuedZKBlocksDisabledRestart(t *testing.T) {
-	store := NewMemoryJobStore()
-	s := &CoordinatorServer{jobStore: store}
-	req := &runtimepb.SubmitJobRequest{JobId: 14006, TaskType: "zk_preimage_prove", Payload: `{"witness_ref":"ref","digest":"1"}`, TimeoutMs: 1000}
-	ack, err := s.SubmitJob(context.Background(), req)
-	assertAdmissionAck(t, ack, err, req.JobId)
-	fresh := &CoordinatorServer{jobStore: store, zkDisabled: true}
-	if err := fresh.checkDisabledZKRecovery(); err == nil {
-		t.Fatal("disabled restart accepted an unfinished admitted ZK job")
-	}
-	if r, ok, err := store.Load(req.JobId); err != nil || !ok || !isUnattemptedQueued(r) {
-		t.Fatalf("startup guard changed queued admission: %+v, %v", r, err)
 	}
 }

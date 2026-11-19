@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -109,7 +108,7 @@ func TestPersistSubmitFailureGuards(t *testing.T) {
 	for _, name := range []string{"matching expired lease", "succeeded", "failed", "cancelled", "recovering", "newer durable generation", "older durable generation", "newer memory generation", "older memory generation", "no session attempt", "zero expected attempt", "missing record", "wrong record JobID", "no ownership", "nil store", "cancelled parent", "expired parent"} {
 		t.Run(name, func(t *testing.T) {
 			want := JobRecord{JobID: 9503, State: JobRunning, AttemptID: 8, WorkerID: "worker",
-				TaskType: "zk_preimage_prove", Payload: preimagePublicPayload(zk.ComputePreimageDigest(42)), TimeoutMs: 1234}
+				TaskType: "hash", Payload: "original input", TimeoutMs: 1234}
 			initial, expected, memory := int64(7), int64(8), int64(8)
 			switch name {
 			case "succeeded":
@@ -453,14 +452,13 @@ func TestSubmitFailureHoldsOwnershipThroughSave(t *testing.T) {
 	assertRecoveryOwnershipReleased(t, s, jobID)
 }
 
-func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
+func TestLateWorkerSuccessCannotOverwriteFailedSubmission(t *testing.T) {
 	const jobID int64 = 9507
-	output, digest, realVerifier := preimageProofFixture(t)
-	payload := preimagePublicPayload(digest)
+	const payload = "reliable compute fixture"
+	output := hashResult(payload)
 	store := newWorkerFailureStore(t)
-	verifier := &observedPreimageVerifier{verifier: realVerifier}
 	dispatchDone := make(chan int64, 2)
-	s := &CoordinatorServer{jobStore: store, preimageVerifier: verifier, leaseDuration: 100 * time.Millisecond,
+	s := &CoordinatorServer{jobStore: store, leaseDuration: 100 * time.Millisecond,
 		onDispatchDone: func(_, attempt int64) { dispatchDone <- attempt }}
 	started, cancelled, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	release := make(chan struct{})
@@ -476,7 +474,7 @@ func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
 		close(started)
 		<-ctx.Done()
 		close(cancelled)
-		<-release // Deliberately produce a real proof after RPC cancellation.
+		<-release // Deliberately return successful output after RPC cancellation.
 		defer close(returned)
 		resp := successfulResult(req)
 		resp.Output = output
@@ -493,7 +491,7 @@ func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
 	defer cancel()
 	finished := make(chan workerFailureResult, 1)
 	go func() {
-		resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 1000})
+		resp, err := s.executeSubmissionForTest(ctx, &runtimepb.SubmitJobRequest{JobId: jobID, TaskType: "hash", Payload: payload, TimeoutMs: 1000})
 		finished <- workerFailureResult{resp: resp, err: err}
 	}()
 	select {
@@ -509,7 +507,7 @@ func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("submission did not finish")
 	}
-	want := preimageRecord(jobID, 2, "failed-worker", JobFailed, payload)
+	want := workerFailureRecord(jobID, 2, "failed-worker", JobFailed, payload)
 	assertRecoveryRecord(t, store, want)
 	select {
 	case <-cancelled:
@@ -536,10 +534,10 @@ func TestLateSuccessfulProofCannotOverwriteFailedSubmission(t *testing.T) {
 			t.Fatal("abandoned dispatch did not finish")
 		}
 	}
-	if !seen[1] || !seen[2] || firstCalls.Load() != 1 || secondCalls.Load() != 1 || verifier.calls.Load() != 0 || s.jobAttempts[jobID] != 2 {
-		t.Fatal("late proof affected execution or verification")
+	if !seen[1] || !seen[2] || firstCalls.Load() != 1 || secondCalls.Load() != 1 || s.jobAttempts[jobID] != 2 {
+		t.Fatal("late response affected execution")
 	}
-	assertWorkerFailureSaves(t, store, []JobRecord{preimageRecord(jobID, 1, "late-worker", JobRunning, payload), preimageRecord(jobID, 2, "failed-worker", JobRunning, payload), want})
+	assertWorkerFailureSaves(t, store, []JobRecord{workerFailureRecord(jobID, 1, "late-worker", JobRunning, payload), workerFailureRecord(jobID, 2, "failed-worker", JobRunning, payload), want})
 	assertRecoveryRecord(t, store, want)
 	assertRecoveryOwnershipReleased(t, s, jobID)
 }

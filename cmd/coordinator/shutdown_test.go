@@ -330,8 +330,8 @@ func TestCoordinatorShutdownActiveSubmitAndDispatch(t *testing.T) {
 }
 
 func TestCoordinatorShutdownDuringSave(t *testing.T) {
-	for _, state := range []JobState{JobRunning, JobFailed} {
-		t.Run(map[JobState]string{JobRunning: "Running publication", JobFailed: "P0 Failed commit wins"}[state], func(t *testing.T) {
+	for _, state := range []JobState{JobRunning, JobFailed, JobSucceeded} {
+		t.Run(map[JobState]string{JobRunning: "Running publication", JobFailed: "P0 Failed commit wins", JobSucceeded: "accepted result commit wins"}[state], func(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
@@ -343,8 +343,11 @@ func TestCoordinatorShutdownDuringSave(t *testing.T) {
 				}
 			})
 			var calls atomic.Int32
-			address := startMTLSBackend(t, f, testpki.Worker, func(context.Context, *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
+			address := startMTLSBackend(t, f, testpki.Worker, func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 				calls.Add(1)
+				if state == JobSucceeded {
+					return executeHashJob(ctx, req)
+				}
 				return nil, status.Error(codes.Unavailable, "injected failure")
 			})
 			registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
@@ -379,7 +382,15 @@ func TestCoordinatorShutdownDuringSave(t *testing.T) {
 				}
 			}
 			assertShutdownStoreClosed(t, store)
-			loadShutdownRecord(t, path, JobRecord{JobID: 9703, State: wantState, AttemptID: wantAttempt, WorkerID: "worker-a", TaskType: "hash", Payload: "preserved", TimeoutMs: 1234})
+			want := JobRecord{JobID: 9703, State: wantState, AttemptID: wantAttempt, WorkerID: "worker-a", TaskType: "hash", Payload: "preserved", TimeoutMs: 1234}
+			if state == JobSucceeded {
+				want.State = JobSucceeded
+				want = withWorkerResult(want, hashResult(want.Payload), "")
+				if calls.Load() != 1 {
+					t.Fatal("shutdown retried an accepted result")
+				}
+			}
+			loadShutdownRecord(t, path, want)
 		})
 	}
 }
@@ -436,70 +447,6 @@ func TestCoordinatorShutdownBeforeP0Finalization(t *testing.T) {
 	awaitShutdownSignal(t, finished)
 	assertShutdownStoreClosed(t, store)
 	loadShutdownRecord(t, path, JobRecord{JobID: 9707, State: JobRecovering, AttemptID: 2, WorkerID: "worker-a", TaskType: "hash", Payload: "hello", TimeoutMs: 1000})
-}
-
-func TestCoordinatorShutdownDuringVerification(t *testing.T) {
-	for _, timeout := range []bool{false, true} {
-		t.Run(map[bool]string{false: "clean after Verify returns", true: "incomplete while Verify blocks"}[timeout], func(t *testing.T) {
-			budget := 2 * time.Second
-			if timeout {
-				budget = 75 * time.Millisecond
-			}
-			f, p, store, path := shutdownFixture(t, budget, nil)
-			output, digest, verifier := preimageProofFixture(t)
-			barrier := &acceptanceBarrierVerifier{verifier: verifier, entered: make(chan struct{}), release: make(chan struct{})}
-			f.s.preimageVerifier = barrier
-			var once sync.Once
-			unblock := func() { once.Do(func() { close(barrier.release) }) }
-			t.Cleanup(unblock)
-			address := startMTLSBackend(t, f, testpki.Worker, func(_ context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
-				resp := successfulResult(req)
-				resp.Output = output
-				return resp, nil
-			})
-			registerMTLSExecutionWorker(t, f, testpki.Worker, "worker-a", address)
-			client := runtimepb.NewCoordinatorServiceClient(f.connection(t, testpki.Client))
-			payload := preimagePublicPayload(digest)
-			finished := make(chan struct{})
-			go func() {
-				defer close(finished)
-				_, _ = client.SubmitJob(mtlsContext(t), &runtimepb.SubmitJobRequest{JobId: 9706, TaskType: "zk_preimage_prove", Payload: payload, TimeoutMs: 1000})
-			}()
-			awaitShutdownSignal(t, barrier.entered)
-			shutdown := make(chan error, 1)
-			go func() { shutdown <- p.shutdown() }()
-			awaitShutdownSignal(t, f.s.lifecycle.ctx.Done())
-			if timeout {
-				if err := <-shutdown; !errors.Is(err, errCoordinatorShutdownIncomplete) || !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("Verify timeout=%v", err)
-				}
-			}
-			if closed, _, _ := store.snapshot(); closed {
-				t.Fatal("closed store while Verify still running")
-			}
-			unblock()
-			if !timeout {
-				if err := <-shutdown; err != nil {
-					t.Fatal(err)
-				}
-			}
-			awaitShutdownSignal(t, finished)
-			awaitShutdownSignal(t, p.cleanupDone)
-			want := preimageRecord(9706, 1, "worker-a", JobRecovering, payload)
-			if timeout {
-				if closed, after, _ := store.snapshot(); closed || after != 0 {
-					t.Fatal("timed-out shutdown resumed cleanup")
-				}
-				assertRecoveryRecord(t, store, want)
-			} else {
-				assertShutdownStoreClosed(t, store)
-				loadShutdownRecord(t, path, want)
-			}
-			if barrier.calls.Load() != 1 || f.s.jobAttempts[9706] != 1 {
-				t.Fatal("shutdown retried or accepted late proof")
-			}
-		})
-	}
 }
 
 func TestCoordinatorShutdownCleanupUsesOverallBudget(t *testing.T) {

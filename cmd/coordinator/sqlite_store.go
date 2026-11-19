@@ -15,21 +15,48 @@ type SQLiteJobStore struct {
 }
 
 func NewSQLiteJobStore(path string) (*SQLiteJobStore, error) {
+	store, err := openSQLiteJobStore(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.initSchema(); err != nil {
+		store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openSQLiteJobStore(path string) (*SQLiteJobStore, error) {
 	db, err := sql.Open("sqlite", sqliteJobStoreDSN(path))
 	if err != nil {
 		return nil, err
 	}
+	return &SQLiteJobStore{db: db}, nil
+}
 
-	store := &SQLiteJobStore{
-		db: db,
+// checkRetiredJobs reads only columns available before schema initialization.
+// Databases without a task_type column cannot contain a named retired task.
+func (s *SQLiteJobStore) checkRetiredJobs() error {
+	var hasTaskType bool
+	if err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'task_type' COLLATE NOCASE
+	)`).Scan(&hasTaskType); err != nil {
+		return fmt.Errorf("check for unfinished retired jobs: %w", err)
 	}
-
-	if err := store.initSchema(); err != nil {
-		db.Close()
-		return nil, err
+	if !hasTaskType {
+		return nil
 	}
-
-	return store, nil
+	var jobID int64
+	err := s.db.QueryRow(`SELECT job_id FROM jobs
+		WHERE task_type = ? COLLATE BINARY AND state IN (?, ?, ?)
+		ORDER BY job_id LIMIT 1`, retiredTaskType, JobQueued, JobRunning, JobRecovering).Scan(&jobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check for unfinished retired jobs: %w", err)
+	}
+	return fmt.Errorf("job %d has unfinished retired task type %q; use a different database or finish pending work with a compatible previous release", jobID, retiredTaskType)
 }
 
 func sqliteJobStoreDSN(path string) string {

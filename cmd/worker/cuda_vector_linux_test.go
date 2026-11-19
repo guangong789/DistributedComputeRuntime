@@ -101,7 +101,7 @@ func TestWorkerCUDAVectorResults(t *testing.T) {
 		os.Stdout = stdout
 		_ = logFile.Close()
 	})
-	worker := &WorkerService{cudaVector: program, zkDisabled: true}
+	worker := &WorkerService{cudaVector: program}
 	_, client := shutdownWorker(t, worker, 2*time.Second)
 	exitError := "cuda_vector_transform: exit status 7"
 	for _, tc := range []struct {

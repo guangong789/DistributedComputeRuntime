@@ -7,8 +7,6 @@
 /coordinator.exe
 /worker
 /worker.exe
-/zksetup
-/zksetup.exe
 /bin/
 *.test
 *.test.exe
@@ -49,10 +47,10 @@ Thumbs.db
 *.log
 *.tmp
 
-# Generated local Groth16 setup keys
+# Keep historical local artifacts ignored
 zk-artifacts/
 
-# Worker-local private witnesses
+# Local credentials and private data
 private/
 
 # Python bytecode

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/guangong789/DistributedZKRuntime/internal/testutil/testpki"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 )
 
 type coordinatorSignalOutput struct {
@@ -58,10 +57,6 @@ func TestCoordinatorSignalSubprocess(t *testing.T) {
 		t.Skip("SIGTERM subprocess check requires Unix")
 	}
 	dir := t.TempDir()
-	pk, vk := filepath.Join(dir, "proving.key"), filepath.Join(dir, "verifying.key")
-	if err := zk.GeneratePreimageSetup(pk, vk); err != nil {
-		t.Fatal(err)
-	}
 	ca := testpki.New(t)
 	files := ca.Issue(t, testpki.Coordinator, nil)
 	dbPath := filepath.Join(dir, "jobs.db")
@@ -74,7 +69,7 @@ func TestCoordinatorSignalSubprocess(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"-db", dbPath, "-verifying-key", vk, "-listen", "127.0.0.1:0", "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "2s", "-tls-cert", files.Cert, "-tls-key", files.Key, "-tls-ca", files.CA, "-allow-client", testpki.Client, "-allow-worker", testpki.Worker}
+	args := []string{"-db", dbPath, "-listen", "127.0.0.1:0", "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "2s", "-tls-cert", files.Cert, "-tls-key", files.Key, "-tls-ca", files.CA, "-allow-client", testpki.Client, "-allow-worker", testpki.Worker}
 	encoded, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)

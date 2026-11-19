@@ -43,13 +43,7 @@ func runClient(ctx context.Context, client runtimepb.CoordinatorServiceClient, c
 	if err != nil {
 		return err
 	}
-	proofSummary := ""
-	// Only this command's submitted workload is known to be a preimage proof.
-	// GetJob intentionally omits TaskType, so reconnect mode displays raw results.
-	if c.ObserveJobID == nil && snapshot.HasWorkerResult && snapshot.State == runtimepb.JobState_JOB_STATE_SUCCEEDED {
-		proofSummary = fmt.Sprintf(" proof_bytes=%d", proofByteLength(snapshot.Output))
-	}
-	if _, err := fmt.Fprintf(out, "job=%d status=%s attempt=%d worker=%q has_worker_result=%t%s output=%q error=%q\n", snapshot.JobId, jobobservation.StateName(snapshot.State), snapshot.AttemptId, snapshot.WorkerId, snapshot.HasWorkerResult, proofSummary, snapshot.Output, snapshot.Error); err != nil {
+	if _, err := fmt.Fprintf(out, "job=%d status=%s attempt=%d worker=%q has_worker_result=%t output=%q error=%q\n", snapshot.JobId, jobobservation.StateName(snapshot.State), snapshot.AttemptId, snapshot.WorkerId, snapshot.HasWorkerResult, snapshot.Output, snapshot.Error); err != nil {
 		return err
 	}
 	return jobobservation.TerminalError(snapshot)

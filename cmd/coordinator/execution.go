@@ -187,17 +187,7 @@ func (s *CoordinatorServer) executeAttemptSession(
 		session.err = err
 		return session
 	}
-	if err := s.checkZKAvailable(spec.TaskType); err != nil {
-		session.err = err
-		return session
-	}
-	var err error
-	// SubmitJob supplies an already validated spec. Recovery supplies the exact
-	// stored spec, which may contain valid legacy JSON. Keep its representation
-	// for every write; normalize only the execution/verification-facing copy.
-	storedSpec := spec
-	spec, err = validateJobSpec(spec)
-	if err != nil {
+	if err := validateJobSpec(spec); err != nil {
 		session.err = err
 		return session
 	}
@@ -223,14 +213,15 @@ func (s *CoordinatorServer) executeAttemptSession(
 		}
 
 		var attemptID int64
+		var err error
 		if i == 0 && start.mode == startPersistedQueuedJob {
 			attemptID, err = s.startQueuedAttempt(start.queued, worker.ID, leaseDuration)
 		} else if i == 0 && start.mode == createRunningJob {
-			attemptID, err = s.admitJobAttempt(storedSpec, worker.ID, leaseDuration)
+			attemptID, err = s.admitJobAttempt(spec, worker.ID, leaseDuration)
 		} else {
 			attemptID, err = s.startAttemptFromSource(
 				spec.JobID, worker.ID, leaseDuration,
-				storedSpec.TaskType, storedSpec.Payload, storedSpec.TimeoutMs, source,
+				spec.TaskType, spec.Payload, spec.TimeoutMs, source,
 			)
 		}
 		if err != nil {
@@ -248,19 +239,19 @@ func (s *CoordinatorServer) executeAttemptSession(
 			return session
 		}
 		lastPublishedAttempt = attemptID
-		session.lastPublished = &JobRecord{JobID: storedSpec.JobID, State: JobRunning,
-			AttemptID: attemptID, WorkerID: worker.ID, TaskType: storedSpec.TaskType,
-			Payload: storedSpec.Payload, TimeoutMs: storedSpec.TimeoutMs}
+		session.lastPublished = &JobRecord{JobID: spec.JobID, State: JobRunning,
+			AttemptID: attemptID, WorkerID: worker.ID, TaskType: spec.TaskType,
+			Payload: spec.Payload, TimeoutMs: spec.TimeoutMs}
 
 		outcome := s.executeAuthorizedAttempt(ctx, authorizedAttempt{
-			storedSpec: storedSpec, executionSpec: spec, worker: worker,
+			spec: spec, worker: worker,
 			attemptID: attemptID, leaseDuration: leaseDuration, source: source,
 		})
 		switch outcome.kind {
 		case attemptAccepted:
 			session.terminal = outcome.terminal
 			return session
-		case attemptRPCFailed, attemptLeaseExpired, attemptFenced, attemptProofRejected:
+		case attemptRPCFailed, attemptLeaseExpired, attemptFenced:
 			lastErr = outcome.err
 		case attemptCancelled, attemptPersistenceFailed, attemptInvalidStatus:
 			session.err = outcome.err

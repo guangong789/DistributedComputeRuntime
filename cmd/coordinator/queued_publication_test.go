@@ -18,7 +18,7 @@ func TestJobStoreQueuedPublication(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			for i, spec := range []struct{ task, payload string }{
 				{"hash", "input"}, {"sleep", "1ms"},
-				{"zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `},
+				{"hash", `  original input  `},
 				{"", ""}, // Legacy/default specs are not newly validated by storage.
 			} {
 				t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -144,19 +144,14 @@ func TestJobStoreQueuedPublicationLegacySpec(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			store := newCreationTestStore(t, backend)
 			queued := queuedPublicationRecord()
-			queued.TaskType = "zk_preimage_prove"
-			queued.Payload = ` { "digest":"+001", "witness_ref":"ref" } `
-			// Use the existing validator to establish semantic equivalence, while
-			// requiring the original durable bytes at the publication boundary.
-			canonical, err := validateJobSpec(JobSpec{JobID: queued.JobID, TaskType: queued.TaskType, Payload: queued.Payload, TimeoutMs: queued.TimeoutMs})
-			if err != nil || canonical.Payload == queued.Payload {
-				t.Fatalf("noncanonical fixture: canonical=%+v err=%v", canonical, err)
-			}
+			queued.TaskType = "hash"
+			queued.Payload = `  original input  `
+
 			saveRecoveryRecord(t, store, queued)
 			stale := queued
-			stale.Payload = canonical.Payload
+			stale.Payload = strings.TrimSpace(queued.Payload)
 			if published, err := store.TryStartQueued(stale, "worker"); published || err != nil {
-				t.Fatalf("normalized spec publication=%v, %v", published, err)
+				t.Fatalf("changed payload publication=%v, %v", published, err)
 			}
 			assertRecoveryRecord(t, store, queued)
 			if published, err := store.TryStartQueued(queued, "worker"); !published || err != nil {
@@ -249,7 +244,7 @@ func TestSQLiteQueuedPublicationReopen(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	queued := queuedPublicationRecord()
-	queued.TaskType, queued.Payload = "zk_preimage_prove", ` { "digest":"+001", "witness_ref":"ref" } `
+	queued.TaskType, queued.Payload = "hash", `  original input  `
 	if created, err := store.Create(queued); !created || err != nil {
 		t.Fatalf("Create=%v, %v", created, err)
 	}

@@ -14,11 +14,8 @@ import (
 // authorizedAttempt is an execution snapshot, not an authorization operation.
 // Its caller holds the JobID claim, has confirmed publication of this generation
 // (except for legacy nil-store internal callers), and has installed its lease.
-// storedSpec retains the exact durable bytes; executionSpec is validated and may
-// contain canonical ZK JSON. Both describe the same job and execution budget.
 type authorizedAttempt struct {
-	storedSpec    JobSpec
-	executionSpec JobSpec
+	spec          JobSpec
 	worker        WorkerInfo
 	attemptID     int64
 	leaseDuration time.Duration
@@ -33,7 +30,6 @@ const (
 	attemptLeaseExpired
 	attemptCancelled
 	attemptFenced
-	attemptProofRejected
 	attemptPersistenceFailed
 	attemptInvalidStatus
 )
@@ -67,9 +63,9 @@ type dispatchResult struct {
 // Worker, retries, or finalizes a failed/cancelled session. The caller retains
 // session ownership through its return and supplies the session context.
 // Dispatch goroutines retain the existing dispatchWG/onDispatchDone protocol;
-// verification and terminal persistence finish synchronously within this call.
+// terminal persistence finish synchronously within this call.
 func (s *CoordinatorServer) executeAuthorizedAttempt(ctx context.Context, attempt authorizedAttempt) (outcome attemptOutcome) {
-	spec, storedSpec, worker := attempt.executionSpec, attempt.storedSpec, attempt.worker
+	spec, worker := attempt.spec, attempt.worker
 	attemptID, source := attempt.attemptID, attempt.source
 	outcome.jobID, outcome.attemptID = spec.JobID, attemptID
 	observer := metrics.Resolve(s.metrics)
@@ -136,25 +132,13 @@ func (s *CoordinatorServer) executeAuthorizedAttempt(ctx context.Context, attemp
 			return outcome
 		}
 
-		if spec.TaskType == "zk_preimage_prove" && finalState == JobSucceeded {
-			if err := verifyZKPreimageResult(s.preimageVerifier, spec.Payload, resp.Output, observer); err != nil {
-				outcome.kind, outcome.err = attemptProofRejected, fmt.Errorf(
-					"preimage proof verification failed for job %d attempt %d: %w", spec.JobID, attemptID, err)
-				observer.AttemptRejected(source, metrics.RejectProof)
-				finishAttempt(metrics.AttemptProofRejected)
-				fmt.Printf("attempt rejected: job=%d attempt=%d worker=%s err=%v\n",
-					spec.JobID, attemptID, worker.ID, outcome.err)
-				return outcome
-			}
-		}
-
 		record := JobRecord{
 			JobID: spec.JobID, State: finalState, AttemptID: attemptID, WorkerID: worker.ID,
-			TaskType: storedSpec.TaskType, Payload: storedSpec.Payload, TimeoutMs: storedSpec.TimeoutMs,
+			TaskType: spec.TaskType, Payload: spec.Payload, TimeoutMs: spec.TimeoutMs,
 			HasWorkerResult: true, Output: resp.Output, Error: resp.Error,
 		}
 		// Keep the final context/lease check and Save in their established critical
-		// section. Verification above can have outlived this generation or lease.
+		// section. The result may already have outlived this generation or lease.
 		eligible, err := s.persistTerminalResult(ctx, record)
 		if !eligible {
 			if err != nil {

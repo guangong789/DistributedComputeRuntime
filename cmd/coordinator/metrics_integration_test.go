@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"io"
 	"math"
@@ -15,8 +14,6 @@ import (
 
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -157,74 +154,23 @@ func assertIntegrationCounterTotal(t *testing.T, view integrationMetricsView, na
 	}
 }
 
-type integrationZKFixture struct {
-	prover    *zk.PreimageProver
-	verifier  *zk.PreimageVerifier
-	witnesses runtime.WitnessStore
-	payload   string
-}
-
-func newIntegrationZKFixture(t testing.TB) integrationZKFixture {
-	t.Helper()
-	dir := t.TempDir()
-	pk, vk := filepath.Join(dir, "proving.key"), filepath.Join(dir, "verifying.key")
-	if err := zk.GeneratePreimageSetup(pk, vk); err != nil {
-		t.Fatal(err)
-	}
-	prover, err := zk.LoadPreimageProver(pk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifier, err := zk.LoadPreimageVerifier(vk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	witnesses := runtime.NewMemoryWitnessStore()
-	witnesses.Put("secret-001", 42)
-	return integrationZKFixture{
-		prover: prover, verifier: verifier, witnesses: witnesses,
-		payload: preimagePublicPayload(zk.ComputePreimageDigest(42)),
-	}
-}
-
-func (fixture integrationZKFixture) execute(ctx context.Context, req *runtimepb.ExecuteJobRequest, observer metrics.Metrics) (*runtimepb.ExecuteJobResponse, error) {
-	jobCtx, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
-	defer cancel()
-	task := runtime.ZKPreimageTask{
-		Payload: req.Payload, Prover: fixture.prover, WitnessStore: fixture.witnesses, Metrics: observer,
-	}
-	result := runtime.ExecuteJob(jobCtx, runtime.Job{ID: int(req.JobId), Task: task, Status: runtime.JobRunning})
-	errorText := ""
-	if result.Err != nil {
-		errorText = result.Err.Error()
-	}
-	return &runtimepb.ExecuteJobResponse{
-		JobId: int64(result.JobID), AttemptId: req.AttemptId,
-		Status: result.Status.String(), Output: result.Output, Error: errorText,
-	}, nil
-}
-
-func TestPrometheusMetricsZKExecution(t *testing.T) {
+func TestPrometheusMetricsExecution(t *testing.T) {
 	for _, tc := range []struct {
-		name            string
-		failedOutcome   metrics.AttemptOutcome
-		rejectReason    metrics.AttemptRejectReason
-		verifyCount     uint64
-		firstProveCount uint64
+		name          string
+		failedOutcome metrics.AttemptOutcome
+		rejectReason  metrics.AttemptRejectReason
 	}{
-		{name: "success", verifyCount: 1, firstProveCount: 1},
-		{name: "rpc retry", failedOutcome: metrics.AttemptRPCError, verifyCount: 1},
-		{name: "fencing", failedOutcome: metrics.AttemptFenced, rejectReason: metrics.RejectFencing, verifyCount: 1, firstProveCount: 1},
-		{name: "invalid proof", failedOutcome: metrics.AttemptProofRejected, rejectReason: metrics.RejectProof, verifyCount: 2, firstProveCount: 1},
+		{name: "success"},
+		{name: "rpc retry", failedOutcome: metrics.AttemptRPCError},
+		{name: "fencing", failedOutcome: metrics.AttemptFenced, rejectReason: metrics.RejectFencing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const jobID int64 = 9201
-			fixture := newIntegrationZKFixture(t)
+			const payload = "reliable compute fixture"
 			store := newWorkerFailureStore(t)
 			coordinatorMetrics := newIntegrationMetricsEndpoint(t)
-			firstMetrics := newIntegrationMetricsEndpoint(t)
 			s := &CoordinatorServer{
-				jobStore: store, preimageVerifier: fixture.verifier, metrics: coordinatorMetrics.backend,
+				jobStore: store, metrics: coordinatorMetrics.backend,
 			}
 			client := startTestCoordinator(t, s)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -246,24 +192,19 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 						return nil, ctx.Err()
 					}
 				}
-				resp, err := fixture.execute(ctx, req, firstMetrics.backend)
+				resp, err := executeHashJob(ctx, req)
 				if tc.name == "fencing" {
 					resp.AttemptId++
 				}
-				if tc.name == "invalid proof" {
-					resp.Output = base64.StdEncoding.EncodeToString([]byte("corrupted proof"))
-				}
 				return resp, err
 			})
-			var secondMetrics integrationMetricsEndpoint
 			if tc.name != "success" {
-				secondMetrics = newIntegrationMetricsEndpoint(t)
 				startWorkerFailureServer(t, client, "worker-2", func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 					secondCalls.Add(1)
 					secondStarted <- req.AttemptId
 					select {
 					case <-releaseSecond:
-						return fixture.execute(ctx, req, secondMetrics.backend)
+						return executeHashJob(ctx, req)
 					case <-ctx.Done():
 						return nil, ctx.Err()
 					}
@@ -272,7 +213,7 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			submitted := make(chan workerFailureResult, 1)
 			go func() {
 				resp, err := submitAndObserveForTest(ctx, client, &runtimepb.SubmitJobRequest{
-					JobId: jobID, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000,
+					JobId: jobID, TaskType: "hash", Payload: payload, TimeoutMs: 5000,
 				})
 				submitted <- workerFailureResult{resp: resp, err: err}
 			}()
@@ -307,9 +248,8 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 					assertIntegrationCounter(t, before, "dzkr_attempts_rejected_total",
 						map[string]string{"source": "submit", "reason": string(tc.rejectReason)}, 1)
 				}
-				assertIntegrationHistogram(t, before, "dzkr_zk_verification_duration_seconds", nil, tc.verifyCount-1)
 				for i, record := range store.savedRecords() {
-					if i == 0 && record == (JobRecord{JobID: jobID, State: JobQueued, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000}) {
+					if i == 0 && record == (JobRecord{JobID: jobID, State: JobQueued, TaskType: "hash", Payload: payload, TimeoutMs: 5000}) {
 						continue
 					}
 					if record.State != JobRunning {
@@ -322,10 +262,10 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			case result := <-submitted:
 				if result.err != nil || result.resp == nil || result.resp.Status != "Succeeded" ||
 					result.resp.JobId != jobID || result.resp.AttemptId != int64(wantAttempts) {
-					t.Fatalf("ZK response=%+v error=%v", result.resp, result.err)
+					t.Fatalf("hash response=%+v error=%v", result.resp, result.err)
 				}
 			case <-ctx.Done():
-				t.Fatal("ZK submission did not finish")
+				t.Fatal("hash submission did not finish")
 			}
 			if firstCalls.Load() != 1 || int(secondCalls.Load()) != wantAttempts-1 {
 				t.Fatalf("unexpected Worker calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
@@ -338,29 +278,21 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			assertIntegrationCounter(t, final, "dzkr_attempts_finished_total", map[string]string{"source": "submit", "outcome": "accepted"}, 1)
 			assertIntegrationCounter(t, final, "dzkr_jobs_terminal_total", map[string]string{"source": "submit", "state": "succeeded"}, 1)
 			assertIntegrationCounterTotal(t, final, "dzkr_jobs_terminal_total", "", 1)
-			for _, reason := range []metrics.AttemptRejectReason{metrics.RejectFencing, metrics.RejectProof} {
+			for _, reason := range []metrics.AttemptRejectReason{metrics.RejectFencing} {
 				want := float64(0)
 				if tc.rejectReason == reason {
 					want = 1
 				}
 				assertIntegrationCounter(t, final, "dzkr_attempts_rejected_total", map[string]string{"source": "submit", "reason": string(reason)}, want)
 			}
-			assertIntegrationHistogram(t, final, "dzkr_zk_verification_duration_seconds", nil, tc.verifyCount)
 			assertIntegrationHistogram(t, final, "dzkr_job_execution_duration_seconds", map[string]string{"source": "submit"}, 1)
 			assertIntegrationHistogram(t, final, "dzkr_attempt_duration_seconds", map[string]string{"source": "submit", "outcome": "accepted"}, 1)
-			assertIntegrationHistogram(t, gatherIntegrationMetrics(t, firstMetrics.registry), "dzkr_zk_proving_duration_seconds", nil, tc.firstProveCount)
-			// Exercise both the Coordinator and Worker real HTTP exposition paths.
+			// Exercise the Coordinator HTTP exposition path.
 			httpCoordinator := scrapeIntegrationMetrics(t, coordinatorMetrics.url)
 			assertIntegrationCounter(t, httpCoordinator, "dzkr_jobs_submitted_total", map[string]string{"source": "submit"}, 1)
 			assertIntegrationCounter(t, httpCoordinator, "dzkr_jobs_terminal_total", map[string]string{"source": "submit", "state": "succeeded"}, 1)
-			assertIntegrationHistogram(t, httpCoordinator, "dzkr_zk_verification_duration_seconds", nil, tc.verifyCount)
-			assertIntegrationHistogram(t, scrapeIntegrationMetrics(t, firstMetrics.url), "dzkr_zk_proving_duration_seconds", nil, tc.firstProveCount)
-			if wantAttempts == 2 {
-				assertIntegrationHistogram(t, gatherIntegrationMetrics(t, secondMetrics.registry), "dzkr_zk_proving_duration_seconds", nil, 1)
-				assertIntegrationHistogram(t, scrapeIntegrationMetrics(t, secondMetrics.url), "dzkr_zk_proving_duration_seconds", nil, 1)
-			}
 			writes := store.savedRecords()
-			if len(writes) != wantAttempts+2 || writes[0] != (JobRecord{JobID: jobID, State: JobQueued, TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000}) {
+			if len(writes) != wantAttempts+2 || writes[0] != (JobRecord{JobID: jobID, State: JobQueued, TaskType: "hash", Payload: payload, TimeoutMs: 5000}) {
 				t.Fatalf("durable writes=%+v", writes)
 			}
 			for i := 0; i < wantAttempts; i++ {
@@ -374,8 +306,8 @@ func TestPrometheusMetricsZKExecution(t *testing.T) {
 			}
 			assertRecoveryRecord(t, store, JobRecord{
 				JobID: jobID, State: JobSucceeded, AttemptID: int64(wantAttempts), WorkerID: wantWorker,
-				TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000,
-				HasWorkerResult: true, Output: storedProofOutput(t, store, jobID, fixture),
+				TaskType: "hash", Payload: payload, TimeoutMs: 5000,
+				HasWorkerResult: true, Output: hashResult(payload),
 			})
 		})
 	}
@@ -420,9 +352,9 @@ func (m *integrationRecoveryPassMetrics) RecoveryPass(outcome metrics.RecoveryPa
 	}
 }
 
-func TestPrometheusMetricsZKRecovery(t *testing.T) {
+func TestPrometheusMetricsRecovery(t *testing.T) {
 	const jobID int64 = 9202
-	fixture := newIntegrationZKFixture(t)
+	const payload = "reliable compute fixture"
 	dbPath := filepath.Join(t.TempDir(), "jobs.db")
 	dbA, err := NewSQLiteJobStore(dbPath)
 	if err != nil {
@@ -430,13 +362,13 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = dbA.Close() })
 	coordinatorA := &CoordinatorServer{jobStore: dbA}
-	attempt, err := coordinatorA.startAttempt(jobID, "old-worker", time.Minute, "zk_preimage_prove", fixture.payload, 5000)
+	attempt, err := coordinatorA.startAttempt(jobID, "old-worker", time.Minute, "hash", payload, 5000)
 	if err != nil || attempt != 1 {
 		t.Fatalf("persist old attempt=%d error=%v", attempt, err)
 	}
 	running1 := JobRecord{
 		JobID: jobID, State: JobRunning, AttemptID: 1, WorkerID: "old-worker",
-		TaskType: "zk_preimage_prove", Payload: fixture.payload, TimeoutMs: 5000,
+		TaskType: "hash", Payload: payload, TimeoutMs: 5000,
 	}
 	assertRecoveryRecord(t, dbA, running1)
 	if err := dbA.Close(); err != nil {
@@ -449,10 +381,9 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	t.Cleanup(func() { _ = dbB.Close() })
 	store := &workerFailureStore{JobStore: dbB}
 	coordinatorMetrics := newIntegrationMetricsEndpoint(t)
-	workerMetrics := newIntegrationMetricsEndpoint(t)
 	passDone := make(chan metrics.RecoveryPassOutcome, 1)
 	s := &CoordinatorServer{
-		jobStore: store, preimageVerifier: fixture.verifier,
+		jobStore:      store,
 		metrics:       &integrationRecoveryPassMetrics{Metrics: coordinatorMetrics.backend, done: passDone},
 		recoveryReady: make(chan struct{}, 1),
 	}
@@ -462,18 +393,17 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	recovering1 := running1
 	recovering1.State = JobRecovering
 	assertRecoveryRecord(t, store, recovering1)
-	assertPublicRecoveryPayload(t, recovering1.Payload)
 	loopCtx, cancelLoop := context.WithCancel(context.Background())
 	loopDone := make(chan struct{})
 	client := startTestCoordinator(t, s)
 	var calls atomic.Int32
 	startWorkerFailureServer(t, client, "recovered-worker", func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 		calls.Add(1)
-		if req.AttemptId != 2 || req.TaskType != "zk_preimage_prove" ||
-			req.Payload != fixture.payload || req.TimeoutMs != 5000 {
+		if req.AttemptId != 2 || req.TaskType != "hash" ||
+			req.Payload != payload || req.TimeoutMs != 5000 {
 			t.Errorf("recovery dispatch=%+v", req)
 		}
-		return fixture.execute(ctx, req, workerMetrics.backend)
+		return executeHashJob(ctx, req)
 	})
 	// Make readiness deterministic before initial discovery; preserve exact metrics.
 	go func() { s.runRecoveryLoop(loopCtx); close(loopDone) }()
@@ -505,7 +435,6 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	assertIntegrationCounter(t, final, "dzkr_jobs_terminal_total", map[string]string{"source": "recovery", "state": "succeeded"}, 1)
 	assertIntegrationCounterTotal(t, final, "dzkr_recovery_execution_failures_total", "", 0)
 	assertIntegrationCounterTotal(t, final, "dzkr_recovery_repair_failures_total", "", 0)
-	assertIntegrationHistogram(t, final, "dzkr_zk_verification_duration_seconds", nil, 1)
 	assertIntegrationHistogram(t, final, "dzkr_job_execution_duration_seconds", map[string]string{"source": "recovery"}, 1)
 	assertIntegrationHistogram(t, final, "dzkr_recovery_pass_duration_seconds", map[string]string{"outcome": "completed"}, 1)
 	for name, samples := range final {
@@ -518,12 +447,11 @@ func TestPrometheusMetricsZKRecovery(t *testing.T) {
 	httpCoordinator := scrapeIntegrationMetrics(t, coordinatorMetrics.url)
 	assertIntegrationCounter(t, httpCoordinator, "dzkr_jobs_terminal_total", map[string]string{"source": "recovery", "state": "succeeded"}, 1)
 	assertIntegrationCounter(t, httpCoordinator, "dzkr_recovery_transitions_total", map[string]string{"cause": "startup"}, 1)
-	assertIntegrationHistogram(t, scrapeIntegrationMetrics(t, workerMetrics.url), "dzkr_zk_proving_duration_seconds", nil, 1)
 	running2 := running1
 	running2.AttemptID, running2.WorkerID = 2, "recovered-worker"
 	succeeded2 := running2
 	succeeded2.State = JobSucceeded
-	succeeded2 = withWorkerResult(succeeded2, storedProofOutput(t, store, jobID, fixture), "")
+	succeeded2 = withWorkerResult(succeeded2, hashResult(payload), "")
 	assertWorkerFailureSaves(t, store, []JobRecord{recovering1, running2, succeeded2})
 	assertRecoveryRecord(t, store, succeeded2)
 	assertRecoveryOwnershipReleased(t, s, jobID)
@@ -538,7 +466,7 @@ func TestPrometheusMetricsRecoveryRepair(t *testing.T) {
 			inner := newWorkerFailureStore(t)
 			record := JobRecord{
 				JobID: 9203, State: JobRecovering, AttemptID: 1, WorkerID: "old-worker",
-				TaskType: "zk_preimage_prove", Payload: preimagePublicPayload(zk.ComputePreimageDigest(42)), TimeoutMs: 5000,
+				TaskType: "hash", Payload: "recover", TimeoutMs: 5000,
 			}
 			saveRecoveryRecord(t, inner, record)
 			coordinatorMetrics := newIntegrationMetricsEndpoint(t)
@@ -580,7 +508,6 @@ func TestPrometheusMetricsRecoveryRepair(t *testing.T) {
 			assertIntegrationCounter(t, view, "dzkr_recovery_execution_failures_total", map[string]string{"reason": "unavailable"}, 1)
 			assertIntegrationCounter(t, view, "dzkr_recovery_passes_total", map[string]string{"outcome": "completed_with_errors"}, 1)
 			assertIntegrationCounterTotal(t, view, "dzkr_jobs_terminal_total", "", 0)
-			assertIntegrationHistogram(t, view, "dzkr_zk_verification_duration_seconds", nil, 0)
 			want := record
 			want.State, want.AttemptID, want.WorkerID = JobRunning, 3, "worker"
 			wantTransition := float64(0)

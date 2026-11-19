@@ -5,12 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
-	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestWorkerBuildOrdinaryTasks(t *testing.T) {
@@ -27,7 +21,6 @@ func TestWorkerBuildOrdinaryTasks(t *testing.T) {
 		{name: "unknown", kind: "unknown", buildError: "unknown task type: unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Ordinary tasks must work without any ZK dependencies.
 			task, err := (&WorkerService{}).buildTask(tc.kind, tc.payload)
 			if tc.buildError != "" {
 				if task != nil || errorString(err) != tc.buildError {
@@ -49,66 +42,6 @@ func TestWorkerBuildOrdinaryTasks(t *testing.T) {
 			}
 			if tc.cancel && !errors.Is(err, context.Canceled) {
 				t.Fatalf("cancellation identity lost: %v", err)
-			}
-		})
-	}
-}
-
-func TestWorkerBuildZKTaskInjectsDependencies(t *testing.T) {
-	limiter := newTestProvingLimiter(t)
-	if !limiter.TryAcquire() {
-		t.Fatal("cannot occupy proving slot")
-	}
-	defer limiter.Release()
-	observer := &workerProvingMetrics{durations: make(chan time.Duration, 1)}
-	worker := &WorkerService{preimageProver: &zk.PreimageProver{}, witnessStore: runtime.NewMemoryWitnessStore(), provingLimiter: limiter, metrics: observer}
-	const payload = `{"witness_ref":"missing","digest":"123"}`
-	task, err := worker.buildTask("zk_preimage_prove", payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	preimage, ok := task.(runtime.ZKPreimageTask)
-	if !ok || preimage.Payload != payload || preimage.Prover != worker.preimageProver ||
-		preimage.WitnessStore != worker.witnessStore || preimage.Limiter != limiter || preimage.Metrics != observer {
-		t.Fatalf("incomplete ZK dependency injection: %#v", task)
-	}
-	// Construction does not acquire or release capacity. Missing witnesses still
-	// fail before admission, even when proving capacity is full.
-	output, err := task.Execute(context.Background())
-	if output != "" || errorString(err) != "witness not found" || len(observer.durations) != 0 {
-		t.Fatalf("output=%q error=%v proving samples=%d", output, err, len(observer.durations))
-	}
-	if limiter.TryAcquire() {
-		// Keep the replacement slot for the deferred release on this failure path.
-		t.Fatal("construction or validation released another task's slot")
-	}
-}
-
-func TestWorkerConstructionErrorPrecedence(t *testing.T) {
-	prover := &zk.PreimageProver{}
-	for _, tc := range []struct {
-		name    string
-		worker  WorkerService
-		code    codes.Code
-		message string
-	}{
-		{name: "prover before store and limiter", message: "preimage prover is not configured"},
-		{name: "store before limiter", worker: WorkerService{preimageProver: prover}, message: "witness store is not configured"},
-		{name: "limiter before payload validation", worker: WorkerService{preimageProver: prover, witnessStore: runtime.NewMemoryWitnessStore()}, code: codes.FailedPrecondition, message: "proving limiter is not configured"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			resp, err := tc.worker.ExecuteJob(context.Background(), &runtimepb.ExecuteJobRequest{
-				JobId: 501, AttemptId: 9, TaskType: "zk_preimage_prove", Payload: "{", TimeoutMs: 1000,
-			})
-			if tc.code != codes.OK {
-				if resp != nil || status.Code(err) != tc.code || status.Convert(err).Message() != tc.message {
-					t.Fatalf("response=%v error=%v", resp, err)
-				}
-				return
-			}
-			if err != nil || resp == nil || resp.JobId != 501 || resp.AttemptId != 9 ||
-				resp.Status != "failed" || resp.Output != "" || resp.Error != tc.message {
-				t.Fatalf("response=%v error=%v", resp, err)
 			}
 		})
 	}

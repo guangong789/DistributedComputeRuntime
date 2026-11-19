@@ -10,7 +10,7 @@ import (
 
 func runningRepairRecord() JobRecord {
 	return JobRecord{JobID: 9950, State: JobRunning, AttemptID: 2, WorkerID: "selected",
-		TaskType: "zk_preimage_prove", Payload: ` { "digest":"+001", "witness_ref":"ref" } `, TimeoutMs: 1000}
+		TaskType: "hash", Payload: `  original input  `, TimeoutMs: 1000}
 }
 
 func TestJobStoreRunningRepair(t *testing.T) {
@@ -34,7 +34,7 @@ func TestJobStoreRunningRepair(t *testing.T) {
 				{"recovering", func(r *JobRecord) { r.State = JobRecovering }},
 				{"generation", func(r *JobRecord) { r.AttemptID++ }},
 				{"worker", func(r *JobRecord) { r.WorkerID = "other" }},
-				{"task", func(r *JobRecord) { r.TaskType = "ZK_PREIMAGE_PROVE" }},
+				{"task", func(r *JobRecord) { r.TaskType = "HASH" }},
 				{"payload", func(r *JobRecord) { r.Payload += " " }},
 				{"timeout", func(r *JobRecord) { r.TimeoutMs++ }},
 				{"presence", func(r *JobRecord) { r.HasWorkerResult = true }},

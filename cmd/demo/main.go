@@ -153,7 +153,7 @@ func connect(ctx context.Context, address, pki string, coordinator *child) (*grp
 }
 
 func runDemo(ctx context.Context, out io.Writer) (result error) {
-	fmt.Fprintln(out, "DistributedZKRuntime | Local Distributed Demo\nReal Coordinator + Worker | gRPC/mTLS + SQLite\n\nInfrastructure")
+	fmt.Fprintln(out, "Distributed Compute Runtime | Local Distributed Demo\nReal Coordinator + Worker | gRPC/mTLS + SQLite\n\nInfrastructure")
 	repo, err := os.Getwd()
 	if err != nil {
 		return err
@@ -205,7 +205,7 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 		return []string{"-tls-cert", filepath.Join(pki, node, "cert.pem"), "-tls-key", filepath.Join(pki, node, "key.pem"), "-tls-ca", filepath.Join(pki, "ca/ca.crt")}
 	}
 	db := filepath.Join(workspace, "jobs.db")
-	args := append([]string{"-disable-zk=true", "-listen", "127.0.0.1:0", "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s", "-db", db, "-allow-client", clientIdentity, "-allow-worker", workerIdentity}, tlsArgs("coordinator")...)
+	args := append([]string{"-listen", "127.0.0.1:0", "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s", "-db", db, "-allow-client", clientIdentity, "-allow-worker", workerIdentity}, tlsArgs("coordinator")...)
 	c, err := startChild(repo, filepath.Join(workspace, "coordinator.log"), "coordinator mTLS listening on ", filepath.Join(workspace, "coordinator"), args...)
 	if err != nil {
 		return fmt.Errorf("Coordinator start: %w", err)
@@ -240,7 +240,7 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 	if err := reservation.Close(); err != nil {
 		return err
 	}
-	args = append([]string{"-disable-zk=true", "-id", "worker-1", "-listen", workerAddress, "-advertise", workerAddress, "-coordinator", address, "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s"}, tlsArgs("worker-1")...)
+	args = append([]string{"-id", "worker-1", "-listen", workerAddress, "-advertise", workerAddress, "-coordinator", address, "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s"}, tlsArgs("worker-1")...)
 	w, err := startChild(repo, filepath.Join(workspace, "worker.log"), "worker registered successfully", filepath.Join(workspace, "worker"), args...)
 	if err != nil {
 		return fmt.Errorf("Worker start: %w", err)
@@ -250,7 +250,7 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 		return fmt.Errorf("Worker registration: %w", err)
 	}
 	fmt.Fprintln(out, "  [3/6] [OK] Worker registered using mTLS")
-	req := &runtimepb.SubmitJobRequest{JobId: 1, TaskType: "hash", Payload: "DistributedZKRuntime local demo", TimeoutMs: 5000}
+	req := &runtimepb.SubmitJobRequest{JobId: 1, TaskType: "hash", Payload: "Distributed Compute Runtime local demo", TimeoutMs: 5000}
 	fmt.Fprintf(out, "\nTask Execution\n  Submitting task: %s\n", req.TaskType)
 	client := runtimepb.NewCoordinatorServiceClient(conn)
 	var ack *runtimepb.SubmitJobResponse

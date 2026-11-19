@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -20,22 +18,6 @@ import (
 func withWorkerResult(record JobRecord, output, resultError string) JobRecord {
 	record.HasWorkerResult, record.Output, record.Error = true, output, resultError
 	return record
-}
-
-// Background recovery has no SubmitJob response. Validate the retained proof
-// independently before using its randomized encoding in full-record assertions.
-func storedProofOutput(t *testing.T, store JobStore, jobID int64, fixture integrationZKFixture) string {
-	t.Helper()
-	r, ok, err := store.Load(jobID)
-	if err != nil || !ok || !r.HasWorkerResult || r.Error != "" {
-		t.Fatalf("missing durable proof: record=%+v found=%v error=%v", r, ok, err)
-	}
-	proof, err := base64.StdEncoding.DecodeString(r.Output)
-	public, payloadErr := zk.ParsePreimagePublicPayload(fixture.payload)
-	if err != nil || payloadErr != nil || len(proof) == 0 || fixture.verifier.Verify(proof, public.Digest) != nil {
-		t.Fatal("durable proof did not verify")
-	}
-	return r.Output
 }
 
 func TestSQLiteTerminalResultMigration(t *testing.T) {
@@ -155,7 +137,7 @@ func TestSQLiteTerminalStateAndResultCommitTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal := withWorkerResult(running, strings.Repeat("proof", 16384), "error details")
+	terminal := withWorkerResult(running, strings.Repeat("data", 16384), "error details")
 	terminal.State = JobSucceeded
 	if _, err := store.db.Exec(`CREATE TRIGGER reject_terminal AFTER UPDATE ON jobs
 		WHEN NEW.has_worker_result = 1 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`); err != nil {

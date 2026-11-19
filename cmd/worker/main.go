@@ -16,11 +16,9 @@ import (
 	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
 	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
 	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
-	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
 	workerheartbeat "github.com/guangong789/DistributedZKRuntime/internal/workerheartbeat"
-	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
@@ -33,19 +31,10 @@ import (
 type WorkerService struct {
 	runtimepb.UnimplementedWorkerServiceServer
 
-	preimageProver *zk.PreimageProver
-	witnessStore   runtime.WitnessStore
 	externalSquare *externalsquare.Program
 	cudaVector     *externalcompute.Program
-	// Immutable after startup; the zero value retains ZK-enabled behavior.
-	zkDisabled bool
-	// Configure one shared limiter before serving ZK requests.
-	provingLimiter *runtime.ProvingLimiter
-	// Configure before serving; implementations must support concurrent calls.
-	metrics metrics.Metrics
 }
 
-var errMissingProvingLimiter = errors.New("proving limiter is not configured")
 var errMissingExternalSquare = errors.New("external_square is not configured")
 var errMissingCUDAVector = errors.New("cuda_vector_transform is not configured")
 
@@ -83,27 +72,6 @@ func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error
 		}
 		return cudavector.NewTask(s.cudaVector, payload)
 
-	case "zk_preimage_prove":
-		if s.preimageProver == nil {
-			return nil, fmt.Errorf("preimage prover is not configured")
-		}
-
-		if s.witnessStore == nil {
-			return nil, fmt.Errorf("witness store is not configured")
-		}
-
-		if s.provingLimiter == nil {
-			return nil, errMissingProvingLimiter
-		}
-
-		return runtime.ZKPreimageTask{
-			Payload:      payload,
-			Prover:       s.preimageProver,
-			WitnessStore: s.witnessStore,
-			Limiter:      s.provingLimiter,
-			Metrics:      metrics.Resolve(s.metrics),
-		}, nil
-
 	default:
 		return nil, fmt.Errorf("unknown task type: %s", taskType)
 	}
@@ -125,15 +93,9 @@ func (s *WorkerService) ExecuteJob(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if s.zkDisabled && req.TaskType == "zk_preimage_prove" {
-		return &runtimepb.ExecuteJobResponse{
-			JobId: req.JobId, AttemptId: req.AttemptId, Status: "Failed",
-			Error: "ZK tasks are disabled",
-		}, nil
-	}
 	task, err := s.buildTask(req.TaskType, req.Payload)
 	if err != nil {
-		if errors.Is(err, errMissingProvingLimiter) || errors.Is(err, errMissingExternalSquare) || errors.Is(err, errMissingCUDAVector) {
+		if errors.Is(err, errMissingExternalSquare) || errors.Is(err, errMissingCUDAVector) {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		return &runtimepb.ExecuteJobResponse{
@@ -156,7 +118,7 @@ func (s *WorkerService) ExecuteJob(
 	}
 
 	result := runtime.ExecuteJob(jobCtx, job)
-	if errors.Is(result.Err, runtime.ErrProvingBusy) || errors.Is(result.Err, externalsquare.ErrBusy) || errors.Is(result.Err, externalcompute.ErrBusy) {
+	if errors.Is(result.Err, externalsquare.ErrBusy) || errors.Is(result.Err, externalcompute.ErrBusy) {
 		return nil, status.Error(codes.ResourceExhausted, result.Err.Error())
 	}
 
@@ -295,32 +257,17 @@ func main() {
 		"coordinator address",
 	)
 
-	provingKeyPath := flag.String(
-		"proving-key",
-		"zk-artifacts/preimage/proving.key",
-		"path to preimage Groth16 proving key",
-	)
-
-	witnessFilePath := flag.String(
-		"witness-file",
-		"private/witnesses.json",
-		"path to local private witness file",
-	)
-
 	metricsAddress := flag.String("metrics-listen", "127.0.0.1:9091", "metrics HTTP listen address (required; loopback by default)")
-	maxConcurrentProofs := flag.Int("max-concurrent-proofs", 1, "maximum simultaneous preimage proving calls (positive)")
 	externalSquarePath := flag.String("external-square-executable", "", "absolute path to the trusted external_square executable (optional)")
 	cudaVectorPath := flag.String("cuda-vector-executable", "", "absolute path to the trusted cuda_vector_transform executable (optional)")
 	shutdownTimeout := workerShutdownFlag(flag.CommandLine)
-	disableZK := workerDisableZKFlag(flag.CommandLine)
 	security := workerSecurityFlags(flag.CommandLine)
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cfg := workerConfig{ID: *workerID, ListenAddress: *listenAddress, AdvertiseAddress: *advertiseAddress,
-		DisableZK:          *disableZK,
-		CoordinatorAddress: *coordinatorAddress, ProvingKeyPath: *provingKeyPath, WitnessFilePath: *witnessFilePath,
-		MetricsAddress: *metricsAddress, MaxConcurrentProofs: *maxConcurrentProofs, ShutdownTimeout: *shutdownTimeout, Security: *security,
+		CoordinatorAddress: *coordinatorAddress, MetricsAddress: *metricsAddress,
+		ShutdownTimeout: *shutdownTimeout, Security: *security,
 		ExternalSquarePath: *externalSquarePath, CUDAVectorPath: *cudaVectorPath}
 	if err := runWorker(ctx, cfg); err != nil {
 		// Helpers report incomplete shutdown; only the process entry point exits.
@@ -333,17 +280,11 @@ func workerShutdownFlag(fs *flag.FlagSet) *time.Duration {
 	return fs.Duration("shutdown-timeout", defaultWorkerShutdownTimeout, "positive total shutdown budget, independent of task deadlines; expiration forces process exit")
 }
 
-func workerDisableZKFlag(fs *flag.FlagSet) *bool {
-	return fs.Bool("disable-zk", false, "disable preimage tasks and ZK material loading; requires homogeneous Coordinator configuration")
-}
-
 type workerConfig struct {
-	DisableZK                                               bool
 	ID, ListenAddress, AdvertiseAddress, CoordinatorAddress string
-	ProvingKeyPath, WitnessFilePath, MetricsAddress         string
+	MetricsAddress                                          string
 	ExternalSquarePath                                      string
 	CUDAVectorPath                                          string
-	MaxConcurrentProofs                                     int
 	ShutdownTimeout                                         time.Duration
 	Security                                                rpcauth.CoordinatorClientConfig
 }
@@ -401,10 +342,6 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err != nil {
 		return fmt.Errorf("worker mTLS configuration: %w", err)
 	}
-	limiter, err := runtime.NewProvingLimiter(cfg.MaxConcurrentProofs)
-	if err != nil {
-		return err
-	}
 	computeSlot := externalcompute.NewSlot()
 	var externalSquare *externalsquare.Program
 	if cfg.ExternalSquarePath != "" {
@@ -423,31 +360,11 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	var prover *zk.PreimageProver
-	var witnesses runtime.WitnessStore
-	if !cfg.DisableZK {
-		prover, err = zk.LoadPreimageProver(cfg.ProvingKeyPath)
-		if err != nil {
-			return fmt.Errorf("load preimage prover: %w", err)
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		witnesses, err = runtime.LoadMemoryWitnessStore(cfg.WitnessFilePath)
-		if err != nil {
-			return fmt.Errorf("load witness store: %w", err)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	registry := prom.NewRegistry()
-	observer, err := prommetrics.New(registry)
-	if err != nil {
+	if _, err := prommetrics.New(registry); err != nil {
 		return fmt.Errorf("initialize metrics: %w", err)
 	}
-	service := &WorkerService{preimageProver: prover, witnessStore: witnesses, zkDisabled: cfg.DisableZK,
-		provingLimiter: limiter, externalSquare: externalSquare, cudaVector: cudaVector, metrics: observer}
+	service := &WorkerService{externalSquare: externalSquare, cudaVector: cudaVector}
 	metricsServer, err := prommetrics.StartHTTP(cfg.MetricsAddress, registry)
 	if err != nil {
 		return fmt.Errorf("start metrics HTTP server: %w", err)
