@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
 	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
 	"google.golang.org/grpc/codes"
@@ -25,8 +27,13 @@ import (
 const externalSquareFixtureName = "external-square-fixture"
 
 func TestMain(m *testing.M) {
-	if len(os.Args) == 1 && filepath.Base(os.Args[0]) == externalSquareFixtureName {
-		os.Exit(externalSquareFixture())
+	if len(os.Args) == 1 {
+		switch filepath.Base(os.Args[0]) {
+		case externalSquareFixtureName:
+			os.Exit(externalSquareFixture())
+		case cudaVectorFixtureName:
+			os.Exit(cudaVectorFixture())
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -55,37 +62,47 @@ func externalSquareFixture() int {
 		fmt.Fprintln(os.Stdout, "25")
 		fmt.Fprint(os.Stderr, strings.Repeat("x", 4096))
 	case "6\n":
-		terms := make(chan os.Signal, 1)
-		signal.Notify(terms, syscall.SIGTERM)
-		pid := []byte(strconv.Itoa(os.Getpid()))
-		if os.WriteFile("ready", pid, 0600) != nil {
-			return 92
-		}
-		<-terms
-		if os.WriteFile("term", pid, 0600) != nil {
-			return 93
-		}
-		// A second TERM would also be ignored. The parent must kill and reap.
-		for range terms {
-		}
+		return holdComputeFixture()
 	default:
 		return 94
 	}
 	return 0
 }
 
-func externalSquareWorker(t *testing.T) (*WorkerService, string) {
+func holdComputeFixture() int {
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	pid := []byte(strconv.Itoa(os.Getpid()))
+	if os.WriteFile("ready", pid, 0600) != nil {
+		return 92
+	}
+	<-terms
+	if os.WriteFile("term", pid, 0600) != nil {
+		return 93
+	}
+	// A second TERM would also be ignored. The parent must kill and reap.
+	for range terms {
+	}
+	return 0
+}
+
+func computeFixturePath(t *testing.T, dir, name string) string {
 	t.Helper()
-	dir := t.TempDir()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, externalSquareFixtureName)
+	path := filepath.Join(dir, name)
 	if err := os.Symlink(exe, path); err != nil {
 		t.Fatal(err)
 	}
-	program, err := externalsquare.NewProgram(path)
+	return path
+}
+
+func externalSquareWorker(t *testing.T, slot *externalcompute.Slot) (*WorkerService, string) {
+	t.Helper()
+	dir := t.TempDir()
+	program, err := externalsquare.NewProgram(computeFixturePath(t, dir, externalSquareFixtureName), slot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +115,7 @@ func externalSquareRequest(payload string, timeoutMS int64) *runtimepb.ExecuteJo
 }
 
 func TestWorkerExternalSquareResults(t *testing.T) {
-	worker, _ := externalSquareWorker(t)
+	worker, _ := externalSquareWorker(t, externalcompute.NewSlot())
 	_, client := shutdownWorker(t, worker, 2*time.Second)
 	for _, tc := range []struct {
 		payload, output, message string
@@ -156,9 +173,30 @@ func awaitExternalSquareMarker(t *testing.T, dir, name string) int {
 }
 
 func TestWorkerExternalSquareLifecycle(t *testing.T) {
-	for _, mode := range []string{"timeout", "shutdown"} {
+	for _, mode := range []string{"timeout", "shutdown", "cuda_timeout", "cuda_shutdown"} {
 		t.Run(mode, func(t *testing.T) {
-			worker, dir := externalSquareWorker(t)
+			slot := externalcompute.NewSlot()
+			worker, squareDir := externalSquareWorker(t, slot)
+			cudaDir := t.TempDir()
+			var err error
+			worker.cudaVector, err = externalcompute.NewProgram(cudavector.TaskType,
+				computeFixturePath(t, cudaDir, cudaVectorFixtureName), slot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shutdown := strings.HasSuffix(mode, "shutdown")
+			dir := squareDir
+			hold, probe := externalSquareRequest("6", 1000), externalSquareRequest("0", 4000)
+			cross := cudaVectorRequest("0", 4000)
+			probeOutput, crossOutput := "0", cudaZeroOutput()
+			if strings.HasPrefix(mode, "cuda_") {
+				dir = cudaDir
+				hold, probe, cross = cudaVectorRequest("6", 1000), cross, probe
+				probeOutput, crossOutput = crossOutput, probeOutput
+			}
+			if shutdown {
+				hold.TimeoutMs = 6000
+			}
 			type response struct {
 				reply *runtimepb.ExecuteJobResponse
 				err   error
@@ -166,7 +204,7 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			local := make(chan response, 1)
 			service := shutdownExecutionService{execute: func(ctx context.Context, req *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error) {
 				reply, err := worker.ExecuteJob(ctx, req)
-				if req.Payload == "6" {
+				if req.TaskType == hold.TaskType && req.Payload == hold.Payload {
 					local <- response{reply, err}
 				}
 				return reply, err
@@ -174,14 +212,10 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			p, client := shutdownWorker(t, service, 3*time.Second)
 			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 			defer cancel()
-			timeoutMS := int64(1000)
-			if mode == "shutdown" {
-				timeoutMS = 6000
-			}
 			remote := make(chan response, 1)
 			start := time.Now()
 			go func() {
-				reply, err := client.ExecuteJob(ctx, externalSquareRequest("6", timeoutMS))
+				reply, err := client.ExecuteJob(ctx, hold)
 				remote <- response{reply, err}
 			}()
 			pid := awaitExternalSquareMarker(t, dir, "ready")
@@ -192,7 +226,7 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			t.Logf("+%s child ready pid=%d start_ticks=%s", time.Since(start), pid, identity.startTicks)
 			stopped := make(chan error, 1)
 			wantCancel := context.DeadlineExceeded
-			if mode == "shutdown" {
+			if shutdown {
 				wantCancel = context.Canceled
 				go func() { stopped <- p.shutdown() }()
 				awaitWorker(t, p.lifecycle.ctx.Done())
@@ -210,9 +244,13 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			}
 			t.Logf("+%s SIGTERM observed; same owned child still alive", time.Since(start))
 			// Probe the actual Worker slot even after lifecycle admission is sealed.
-			got, err := worker.ExecuteJob(ctx, externalSquareRequest("0", 4000))
+			got, err := worker.ExecuteJob(ctx, probe)
 			if got != nil || status.Code(err) != codes.ResourceExhausted {
 				t.Fatalf("cancellation released the slot before reap: %v, %v", got, err)
+			}
+			got, err = worker.ExecuteJob(ctx, cross)
+			if got != nil || status.Code(err) != codes.ResourceExhausted {
+				t.Fatalf("other workload bypassed the slot: %v, %v", got, err)
 			}
 			select {
 			case <-local:
@@ -233,7 +271,7 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			}
 			t.Logf("+%s pid=%d reaped; %s", time.Since(start), pid, result.reply.Error)
 			rpc := awaitWorker(t, remote)
-			if mode == "shutdown" {
+			if shutdown {
 				if rpc.err == nil && rpc.reply.GetStatus() != "Cancelled" {
 					t.Fatalf("unexpected shutdown reply: %v", rpc.reply)
 				}
@@ -245,8 +283,12 @@ func TestWorkerExternalSquareLifecycle(t *testing.T) {
 			} else if rpc.err != nil || rpc.reply.GetStatus() != "Cancelled" || rpc.reply.GetError() != result.reply.GetError() {
 				t.Fatalf("timeout RPC returned %v, %v", rpc.reply, rpc.err)
 			}
-			got, err = worker.ExecuteJob(ctx, externalSquareRequest("0", 4000))
-			if err != nil || got.GetStatus() != "Succeeded" || got.GetOutput() != "0" {
+			got, err = worker.ExecuteJob(ctx, probe)
+			if err != nil || got.GetStatus() != "Succeeded" || got.GetOutput() != probeOutput {
+				t.Fatalf("original workload could not reuse its slot: %v, %v", got, err)
+			}
+			got, err = worker.ExecuteJob(ctx, cross)
+			if err != nil || got.GetStatus() != "Succeeded" || got.GetOutput() != crossOutput {
 				t.Fatalf("slot was not reusable after reap: %v, %v", got, err)
 			}
 		})

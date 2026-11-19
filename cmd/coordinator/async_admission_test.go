@@ -45,6 +45,27 @@ func TestExternalSquareAdmission(t *testing.T) {
 		TaskType: req.TaskType, Payload: req.Payload, TimeoutMs: req.TimeoutMs})
 }
 
+func TestCUDAVectorAdmission(t *testing.T) {
+	store := NewMemoryJobStore()
+	s := &CoordinatorServer{jobStore: store}
+	req := &runtimepb.SubmitJobRequest{JobId: 14021, TaskType: "cuda_vector_transform", TimeoutMs: 1000}
+	suffix := strings.Repeat(",0", 63)
+	for _, payload := range []string{"", "1", "65536" + suffix, "01" + suffix, "0" + suffix + "\n"} {
+		req.Payload = payload
+		if got, err := s.SubmitJob(t.Context(), req); got != nil || status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("SubmitJob(%q) = %v, %v", payload, got, err)
+		}
+		if _, found, err := store.Load(req.JobId); found || err != nil {
+			t.Fatalf("invalid payload was admitted: found=%v error=%v", found, err)
+		}
+	}
+	req.Payload = "65535" + suffix
+	got, err := s.SubmitJob(t.Context(), req)
+	assertAdmissionAck(t, got, err, req.JobId)
+	assertRecoveryRecord(t, store, JobRecord{JobID: req.JobId, State: JobQueued,
+		TaskType: req.TaskType, Payload: req.Payload, TimeoutMs: req.TimeoutMs})
+}
+
 func TestAsyncAdmissionWithoutWorker(t *testing.T) {
 	for _, backend := range []string{"memory", "sqlite"} {
 		t.Run(backend, func(t *testing.T) {

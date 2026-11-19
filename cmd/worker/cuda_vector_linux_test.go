@@ -1,0 +1,104 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
+	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+const cudaVectorFixtureName = "cuda-vector-fixture"
+
+func cudaZeroOutput() string {
+	values := make([]string, 64)
+	for i, expected := 0, 11; i < len(values); i, expected = i+1, expected+3 {
+		values[i] = strconv.Itoa(expected)
+	}
+	return strings.Join(values, ",")
+}
+
+func cudaVectorFixture() int {
+	if env := os.Environ(); len(env) != 1 || env[0] != "LC_ALL=C" {
+		return 90
+	}
+	input, err := io.ReadAll(io.LimitReader(os.Stdin, 385))
+	if err != nil || len(input) == 0 || string(input[1:]) != strings.Repeat(",0", 63)+"\n" {
+		return 91
+	}
+	switch input[0] {
+	case '0':
+		fmt.Fprintln(os.Stdout, cudaZeroOutput())
+	case '1':
+		return 7
+	case '2':
+		fmt.Fprintln(os.Stdout, "malformed")
+	case '3':
+		// Correct shape, incorrect first value (20 would be correct).
+		fmt.Fprintln(os.Stdout, "19"+cudaZeroOutput()[2:])
+	case '4':
+		fmt.Fprint(os.Stdout, strings.Repeat("x", 1025))
+	case '5':
+		fmt.Fprintln(os.Stdout, "36"+cudaZeroOutput()[2:])
+		fmt.Fprint(os.Stderr, strings.Repeat("x", 1025))
+	case '6':
+		return holdComputeFixture()
+	default:
+		return 94
+	}
+	return 0
+}
+
+func cudaVectorRequest(first string, timeoutMS int64) *runtimepb.ExecuteJobRequest {
+	return &runtimepb.ExecuteJobRequest{JobId: 907, AttemptId: 8, TaskType: cudavector.TaskType,
+		Payload: first + strings.Repeat(",0", 63), TimeoutMs: timeoutMS}
+}
+
+func TestWorkerCUDAVectorResults(t *testing.T) {
+	path := computeFixturePath(t, t.TempDir(), cudaVectorFixtureName)
+	program, err := externalcompute.NewProgram(cudavector.TaskType, path, externalcompute.NewSlot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &WorkerService{cudaVector: program, zkDisabled: true}
+	_, client := shutdownWorker(t, worker, 2*time.Second)
+	for _, tc := range []struct {
+		first, output, message string
+	}{
+		{first: "0", output: cudaZeroOutput()},
+		{first: "1", message: "cuda_vector_transform: exit status 7"},
+		{first: "2", message: "cuda_vector_transform child returned an invalid or incorrect result"},
+		{first: "3", message: "cuda_vector_transform child returned an invalid or incorrect result"},
+		{first: "4", message: "cuda_vector_transform child output exceeded its byte limit"},
+		{first: "5", message: "cuda_vector_transform child output exceeded its byte limit"},
+	} {
+		t.Run(tc.first, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			got, err := client.ExecuteJob(ctx, cudaVectorRequest(tc.first, 4000))
+			if err != nil || got.GetJobId() != 907 || got.GetAttemptId() != 8 || got.GetOutput() != tc.output || got.GetError() != tc.message {
+				t.Fatalf("ExecuteJob returned %v, %v", got, err)
+			}
+			if tc.message == "" && got.Status != "Succeeded" || tc.message != "" && got.Status != "Failed" {
+				t.Fatalf("unexpected status: %s", got.Status)
+			}
+		})
+	}
+	got, err := worker.ExecuteJob(t.Context(), cudaVectorRequest("00", 4000))
+	if err != nil || got.GetStatus() != "failed" || !strings.Contains(got.GetError(), "64 canonical comma-separated") {
+		t.Fatalf("invalid payload execution returned %v, %v", got, err)
+	}
+	got, err = (&WorkerService{}).ExecuteJob(t.Context(), cudaVectorRequest("0", 4000))
+	if got != nil || status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unconfigured execution returned %v, %v", got, err)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
 	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
 	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/zk"
@@ -86,6 +87,10 @@ func validateJobSpec(spec JobSpec) (JobSpec, error) {
 		spec.Payload = payload.CanonicalJSON
 	case externalsquare.TaskType:
 		if _, err := externalsquare.ParsePayload(spec.Payload); err != nil {
+			return JobSpec{}, status.Error(codes.InvalidArgument, err.Error())
+		}
+	case cudavector.TaskType:
+		if _, err := cudavector.ParsePayload(spec.Payload); err != nil {
 			return JobSpec{}, status.Error(codes.InvalidArgument, err.Error())
 		}
 	}

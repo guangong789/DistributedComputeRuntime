@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedZKRuntime/internal/externalcompute"
 	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
@@ -34,6 +36,7 @@ type WorkerService struct {
 	preimageProver *zk.PreimageProver
 	witnessStore   runtime.WitnessStore
 	externalSquare *externalsquare.Program
+	cudaVector     *externalcompute.Program
 	// Immutable after startup; the zero value retains ZK-enabled behavior.
 	zkDisabled bool
 	// Configure one shared limiter before serving ZK requests.
@@ -44,6 +47,7 @@ type WorkerService struct {
 
 var errMissingProvingLimiter = errors.New("proving limiter is not configured")
 var errMissingExternalSquare = errors.New("external_square is not configured")
+var errMissingCUDAVector = errors.New("cuda_vector_transform is not configured")
 
 // buildTask supplies all Worker dependencies before returning an executable task.
 func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error) {
@@ -72,6 +76,12 @@ func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error
 			return nil, err
 		}
 		return task, nil
+
+	case cudavector.TaskType:
+		if s.cudaVector == nil {
+			return nil, errMissingCUDAVector
+		}
+		return cudavector.NewTask(s.cudaVector, payload)
 
 	case "zk_preimage_prove":
 		if s.preimageProver == nil {
@@ -123,7 +133,7 @@ func (s *WorkerService) ExecuteJob(
 	}
 	task, err := s.buildTask(req.TaskType, req.Payload)
 	if err != nil {
-		if errors.Is(err, errMissingProvingLimiter) || errors.Is(err, errMissingExternalSquare) {
+		if errors.Is(err, errMissingProvingLimiter) || errors.Is(err, errMissingExternalSquare) || errors.Is(err, errMissingCUDAVector) {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		return &runtimepb.ExecuteJobResponse{
@@ -146,7 +156,7 @@ func (s *WorkerService) ExecuteJob(
 	}
 
 	result := runtime.ExecuteJob(jobCtx, job)
-	if errors.Is(result.Err, runtime.ErrProvingBusy) || errors.Is(result.Err, externalsquare.ErrBusy) {
+	if errors.Is(result.Err, runtime.ErrProvingBusy) || errors.Is(result.Err, externalsquare.ErrBusy) || errors.Is(result.Err, externalcompute.ErrBusy) {
 		return nil, status.Error(codes.ResourceExhausted, result.Err.Error())
 	}
 
@@ -295,6 +305,7 @@ func main() {
 	metricsAddress := flag.String("metrics-listen", "127.0.0.1:9091", "metrics HTTP listen address (required; loopback by default)")
 	maxConcurrentProofs := flag.Int("max-concurrent-proofs", 1, "maximum simultaneous preimage proving calls (positive)")
 	externalSquarePath := flag.String("external-square-executable", "", "absolute path to the trusted external_square executable (optional)")
+	cudaVectorPath := flag.String("cuda-vector-executable", "", "absolute path to the trusted cuda_vector_transform executable (optional)")
 	shutdownTimeout := workerShutdownFlag(flag.CommandLine)
 	disableZK := workerDisableZKFlag(flag.CommandLine)
 	security := workerSecurityFlags(flag.CommandLine)
@@ -305,7 +316,7 @@ func main() {
 		DisableZK:          *disableZK,
 		CoordinatorAddress: *coordinatorAddress, ProvingKeyPath: *provingKeyPath, WitnessFilePath: *witnessFilePath,
 		MetricsAddress: *metricsAddress, MaxConcurrentProofs: *maxConcurrentProofs, ShutdownTimeout: *shutdownTimeout, Security: *security,
-		ExternalSquarePath: *externalSquarePath}
+		ExternalSquarePath: *externalSquarePath, CUDAVectorPath: *cudaVectorPath}
 	if err := runWorker(ctx, cfg); err != nil {
 		// Helpers report incomplete shutdown; only the process entry point exits.
 		log.Print(err)
@@ -326,6 +337,7 @@ type workerConfig struct {
 	ID, ListenAddress, AdvertiseAddress, CoordinatorAddress string
 	ProvingKeyPath, WitnessFilePath, MetricsAddress         string
 	ExternalSquarePath                                      string
+	CUDAVectorPath                                          string
 	MaxConcurrentProofs                                     int
 	ShutdownTimeout                                         time.Duration
 	Security                                                rpcauth.CoordinatorClientConfig
@@ -388,11 +400,19 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err != nil {
 		return err
 	}
+	computeSlot := externalcompute.NewSlot()
 	var externalSquare *externalsquare.Program
 	if cfg.ExternalSquarePath != "" {
-		externalSquare, err = externalsquare.NewProgram(cfg.ExternalSquarePath)
+		externalSquare, err = externalsquare.NewProgram(cfg.ExternalSquarePath, computeSlot)
 		if err != nil {
 			return fmt.Errorf("configure external_square: %w", err)
+		}
+	}
+	var cudaVector *externalcompute.Program
+	if cfg.CUDAVectorPath != "" {
+		cudaVector, err = externalcompute.NewProgram(cudavector.TaskType, cfg.CUDAVectorPath, computeSlot)
+		if err != nil {
+			return fmt.Errorf("configure cuda_vector_transform: %w", err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -422,7 +442,7 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 		return fmt.Errorf("initialize metrics: %w", err)
 	}
 	service := &WorkerService{preimageProver: prover, witnessStore: witnesses, zkDisabled: cfg.DisableZK,
-		provingLimiter: limiter, externalSquare: externalSquare, metrics: observer}
+		provingLimiter: limiter, externalSquare: externalSquare, cudaVector: cudaVector, metrics: observer}
 	metricsServer, err := prommetrics.StartHTTP(cfg.MetricsAddress, registry)
 	if err != nil {
 		return fmt.Errorf("start metrics HTTP server: %w", err)
