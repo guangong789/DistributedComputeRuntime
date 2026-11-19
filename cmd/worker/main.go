@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
 	"github.com/guangong789/DistributedZKRuntime/internal/metrics"
 	prommetrics "github.com/guangong789/DistributedZKRuntime/internal/metrics/prometheus"
 	"github.com/guangong789/DistributedZKRuntime/internal/rpcauth"
@@ -32,6 +33,7 @@ type WorkerService struct {
 
 	preimageProver *zk.PreimageProver
 	witnessStore   runtime.WitnessStore
+	externalSquare *externalsquare.Program
 	// Immutable after startup; the zero value retains ZK-enabled behavior.
 	zkDisabled bool
 	// Configure one shared limiter before serving ZK requests.
@@ -41,6 +43,7 @@ type WorkerService struct {
 }
 
 var errMissingProvingLimiter = errors.New("proving limiter is not configured")
+var errMissingExternalSquare = errors.New("external_square is not configured")
 
 // buildTask supplies all Worker dependencies before returning an executable task.
 func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error) {
@@ -59,6 +62,16 @@ func (s *WorkerService) buildTask(taskType, payload string) (runtime.Task, error
 		return runtime.SleepTask{
 			Duration: duration,
 		}, nil
+
+	case externalsquare.TaskType:
+		if s.externalSquare == nil {
+			return nil, errMissingExternalSquare
+		}
+		task, err := s.externalSquare.Task(payload)
+		if err != nil {
+			return nil, err
+		}
+		return task, nil
 
 	case "zk_preimage_prove":
 		if s.preimageProver == nil {
@@ -110,7 +123,7 @@ func (s *WorkerService) ExecuteJob(
 	}
 	task, err := s.buildTask(req.TaskType, req.Payload)
 	if err != nil {
-		if errors.Is(err, errMissingProvingLimiter) {
+		if errors.Is(err, errMissingProvingLimiter) || errors.Is(err, errMissingExternalSquare) {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		return &runtimepb.ExecuteJobResponse{
@@ -133,7 +146,7 @@ func (s *WorkerService) ExecuteJob(
 	}
 
 	result := runtime.ExecuteJob(jobCtx, job)
-	if errors.Is(result.Err, runtime.ErrProvingBusy) {
+	if errors.Is(result.Err, runtime.ErrProvingBusy) || errors.Is(result.Err, externalsquare.ErrBusy) {
 		return nil, status.Error(codes.ResourceExhausted, result.Err.Error())
 	}
 
@@ -281,6 +294,7 @@ func main() {
 
 	metricsAddress := flag.String("metrics-listen", "127.0.0.1:9091", "metrics HTTP listen address (required; loopback by default)")
 	maxConcurrentProofs := flag.Int("max-concurrent-proofs", 1, "maximum simultaneous preimage proving calls (positive)")
+	externalSquarePath := flag.String("external-square-executable", "", "absolute path to the trusted external_square executable (optional)")
 	shutdownTimeout := workerShutdownFlag(flag.CommandLine)
 	disableZK := workerDisableZKFlag(flag.CommandLine)
 	security := workerSecurityFlags(flag.CommandLine)
@@ -290,7 +304,8 @@ func main() {
 	cfg := workerConfig{ID: *workerID, ListenAddress: *listenAddress, AdvertiseAddress: *advertiseAddress,
 		DisableZK:          *disableZK,
 		CoordinatorAddress: *coordinatorAddress, ProvingKeyPath: *provingKeyPath, WitnessFilePath: *witnessFilePath,
-		MetricsAddress: *metricsAddress, MaxConcurrentProofs: *maxConcurrentProofs, ShutdownTimeout: *shutdownTimeout, Security: *security}
+		MetricsAddress: *metricsAddress, MaxConcurrentProofs: *maxConcurrentProofs, ShutdownTimeout: *shutdownTimeout, Security: *security,
+		ExternalSquarePath: *externalSquarePath}
 	if err := runWorker(ctx, cfg); err != nil {
 		// Helpers report incomplete shutdown; only the process entry point exits.
 		log.Print(err)
@@ -310,6 +325,7 @@ type workerConfig struct {
 	DisableZK                                               bool
 	ID, ListenAddress, AdvertiseAddress, CoordinatorAddress string
 	ProvingKeyPath, WitnessFilePath, MetricsAddress         string
+	ExternalSquarePath                                      string
 	MaxConcurrentProofs                                     int
 	ShutdownTimeout                                         time.Duration
 	Security                                                rpcauth.CoordinatorClientConfig
@@ -372,6 +388,13 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err != nil {
 		return err
 	}
+	var externalSquare *externalsquare.Program
+	if cfg.ExternalSquarePath != "" {
+		externalSquare, err = externalsquare.NewProgram(cfg.ExternalSquarePath)
+		if err != nil {
+			return fmt.Errorf("configure external_square: %w", err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -398,7 +421,8 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err != nil {
 		return fmt.Errorf("initialize metrics: %w", err)
 	}
-	service := &WorkerService{preimageProver: prover, witnessStore: witnesses, zkDisabled: cfg.DisableZK, provingLimiter: limiter, metrics: observer}
+	service := &WorkerService{preimageProver: prover, witnessStore: witnesses, zkDisabled: cfg.DisableZK,
+		provingLimiter: limiter, externalSquare: externalSquare, metrics: observer}
 	metricsServer, err := prommetrics.StartHTTP(cfg.MetricsAddress, registry)
 	if err != nil {
 		return fmt.Errorf("start metrics HTTP server: %w", err)

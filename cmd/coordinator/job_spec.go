@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/guangong789/DistributedZKRuntime/internal/externalsquare"
 	runtime "github.com/guangong789/DistributedZKRuntime/internal/runtime"
 	"github.com/guangong789/DistributedZKRuntime/internal/zk"
 	runtimepb "github.com/guangong789/DistributedZKRuntime/proto"
@@ -76,12 +77,17 @@ func validateJobSpec(spec JobSpec) (JobSpec, error) {
 	if _, err := runtime.TaskTimeoutFromMilliseconds(spec.TimeoutMs); err != nil {
 		return JobSpec{}, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if spec.TaskType == "zk_preimage_prove" {
+	switch spec.TaskType {
+	case "zk_preimage_prove":
 		payload, err := zk.ParsePreimagePublicPayload(spec.Payload)
 		if err != nil {
 			return JobSpec{}, status.Error(codes.InvalidArgument, err.Error())
 		}
 		spec.Payload = payload.CanonicalJSON
+	case externalsquare.TaskType:
+		if _, err := externalsquare.ParsePayload(spec.Payload); err != nil {
+			return JobSpec{}, status.Error(codes.InvalidArgument, err.Error())
+		}
 	}
 	return spec, nil
 }
