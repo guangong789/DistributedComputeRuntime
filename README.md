@@ -6,7 +6,7 @@
 
 DistributedZKRuntime 是一个用 Go 实现的分布式任务运行时，采用单 Coordinator、多 Worker 模型，通过 gRPC/mTLS 通信，并使用 SQLite 持久化任务状态与完整任务规格。运行时管理任务尝试、重试、lease、过期结果 fencing、取消与重启恢复。BN254 上的 MiMC 原像 Groth16 证明是其中的专用工作负载：Worker 生成证明，Coordinator 独立验证计算结果。
 
-项目关注远端计算中的结果接受问题：请求超时、Worker 故障或 Coordinator 重启之后，系统如何区分仍然有效的结果与已经过期的尝试？下面的六个设计取舍解释了证明验证、任务身份和资源生命周期如何共同回答这个问题。
+项目关注远端计算中的结果接受问题：请求超时、Worker 故障或 Coordinator 重启之后，系统如何区分仍然有效的结果与已经过期的尝试？下面的五个设计取舍解释了证明验证、任务身份和资源生命周期如何共同回答这个问题。
 
 ## 架构概览
 
@@ -32,7 +32,7 @@ flowchart LR
 - **分布式执行：** 注册、心跳与存活检测，支持 hash、sleep 和 preimage 证明任务。
 - **可靠性：** AttemptID、lease、结果 fencing、故障重试、取消、SQLite 恢复和有界关闭。
 - **信任与容量：** mTLS 授权、公开载荷校验、独立 Groth16 验证和 Worker 证明并发限制。
-- **观测与实验：** 语义化指标、Prometheus 后端和独立 CPU MiMC Chain 实验。
+- **可观测性：** 语义化运行时指标和 Prometheus 指标端点。
 
 ## 设计取舍
 
@@ -66,25 +66,6 @@ Go context 取消是协作信号，当前同步 Groth16 Prove 不会因此自动
 
 Worker 共享的 [ProvingLimiter](internal/runtime/proving_limiter.go) 因而将名额保留到任务真正退出，容量满时直接返回 ResourceExhausted。[ZKPreimageTask](internal/runtime/zk_preimage_task.go) 在 Prove 前检查取消，并在证明和编码完成后检查结果截止时间；迟到输出可以丢弃，尚未结束的计算却仍计入容量。Worker 关闭时也等待实际 handler 退出，使资源归还以计算完成为依据。
 
-### 6. CPU Groth16 实验退出码为 0，为什么还不能算成功？
-
-正常退出只说明程序报告了成功，并不能说明它执行了预期密码学操作或测量了正确窗口。[CPU pilot](internal/zk/experimental/mimcchain/pilot_n2_test.go) 记录实际操作的开始、结束、次数和结果；已验收的 N=8 流程还将源码、二进制与策略绑定到同一次运行。Barrier 确认目标就绪后才释放工作，使采样与执行顺序可以核对。
-
-资源证据保留进程组 RSS 原始样本，并检查受管理进程的所有权和清理结果。[最终收集器](tools/bench/d2_collect.py) 综合操作记录、来源绑定、资源观测和截止条件判定接受，缺证或矛盾不会因为退出码为零就通过。独立检查核对的是源码绑定的 Go Verify 记录，不另行重跑数学验证；已验收 N=8 pilot 展示了这种从实际调用到最终接受的证据链。
-
-## CPU 实验
-
-独立的 [MiMC Chain](internal/zk/experimental/mimcchain/circuit.go) 使用固定长度哈希链，与生产 preimage 任务分开，尚未接入任务调度。N=2 与 N=8 均已完成真实 CPU Groth16 试验，其中 N=8 pilot 已独立验收。
-
-| 指标 | N=2 | N=8 |
-|---|---:|---:|
-| 约束数量 | 661 | 2,641 |
-| Setup | 54.18 ms | 204.938 ms |
-| Prove | 9.52 ms | 29.743 ms |
-| Verify | 0.50 ms | 0.615 ms |
-
-每项计时都是单次调用的观测值，不是统计平均值，也不代表生产吞吐量或统计扩展规律。N=8 共同采样的进程组 RSS 峰值为 **21,484 KiB**；有限采样不等于完整运行峰值或硬内存限制。实验工具与验收条件见 [CPU 实验工具说明](tools/bench/README.md)。
-
 ## 快速开始
 
 在 **Linux/WSL** 的仓库根目录运行真实本地演示：
@@ -108,5 +89,3 @@ go build -mod=readonly ./...
 ## 范围与限制
 
 当前运行时采用单 Coordinator、多 Worker 模型，通过 SQLite 持久化任务状态并支持重启恢复，尚不支持多 Coordinator 高可用。AttemptID 与 lease 共同约束结果接受；旧计算可能与重试重叠，因此结果 fencing 不等于恰好执行一次的保证，计算是否执行与结果是否被接受是两个不同问题。
-
-生产 ZK 工作负载是在 BN254 上证明 MiMC 原像关系的 Groth16 任务。MiMC Chain 是独立实验，N=2 与 N=8 已完成 CPU pilot，N=32 仅完成编译校准。这些实验计时描述相应操作的单次观测，不代表生产系统的吞吐量。

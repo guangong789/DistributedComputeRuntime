@@ -6,7 +6,7 @@
 
 DistributedZKRuntime is a Go distributed job runtime with one Coordinator, multiple Workers, gRPC/mTLS communication, and SQLite-backed job state and full task specifications. The runtime manages execution attempts, retries, leases, stale-result fencing, cancellation, and restart recovery. A Groth16 proof of a MiMC preimage relation on BN254 is a specialized workload: Workers generate proofs, and the Coordinator independently verifies the results.
 
-The project focuses on result acceptance when remote computation outlives a request, a Worker fails, or the Coordinator restarts. The six design decisions below explain how proof verification, attempt identity, and resource lifetimes distinguish an eligible result from an obsolete attempt.
+The project focuses on result acceptance when remote computation outlives a request, a Worker fails, or the Coordinator restarts. The five design decisions below explain how proof verification, attempt identity, and resource lifetimes distinguish an eligible result from an obsolete attempt.
 
 ## Architecture Overview
 
@@ -32,7 +32,7 @@ flowchart LR
 - **Distributed execution:** Registration, heartbeat, liveness detection, and hash, sleep, and preimage proof tasks.
 - **Reliability:** AttemptIDs, leases, result fencing, failure retries, cancellation, SQLite recovery, and bounded shutdown.
 - **Trust and capacity:** mTLS authorization, public payload validation, independent Groth16 verification, and Worker proving admission.
-- **Observability and experiments:** Semantic metrics, a Prometheus backend, and standalone CPU MiMC Chain experiments.
+- **Observability:** Semantic runtime metrics and a Prometheus metrics endpoint.
 
 ## Design Decisions
 
@@ -66,25 +66,6 @@ Go context cancellation is cooperative; the current synchronous Groth16 Prove ca
 
 The Worker's shared [ProvingLimiter](internal/runtime/proving_limiter.go) therefore retains the slot until the task actually exits and returns ResourceExhausted when full. [ZKPreimageTask](internal/runtime/zk_preimage_task.go) checks cancellation before Prove and the result deadline after proof generation and encoding. Late output can be discarded while unfinished computation still counts against capacity. Worker shutdown also joins actual handlers, tying resource release to computation completion.
 
-### 6. Why isn't exit code zero enough to establish a successful CPU Groth16 experiment?
-
-A normal exit only says the program reported success, not that it performed the intended cryptographic operations or measured the right window. The [CPU pilot](internal/zk/experimental/mimcchain/pilot_n2_test.go) records actual operation starts, ends, counts, and outcomes. In the accepted N=8 workflow, source, binary, and policy are bound to the same run. A Barrier confirms readiness before releasing work so observation and execution order can be checked.
-
-Resource evidence retains raw process-group RSS samples and checks ownership and cleanup of managed processes. The [final collector](tools/bench/d2_collect.py) combines operation records, provenance bindings, resource observations, and deadlines when deciding acceptance; missing or contradictory evidence cannot pass merely because the exit code is zero. Independent checking reconciles Verify records from the source-bound Go program rather than rerunning mathematical verification. The accepted N=8 pilot demonstrates this evidence chain from actual calls to final acceptance.
-
-## CPU Experiments
-
-The standalone [MiMC Chain](internal/zk/experimental/mimcchain/circuit.go) uses a fixed-length hash chain, separate from the production preimage task and not integrated into job scheduling. N=2 and N=8 have both completed real CPU Groth16 pilots, with the N=8 pilot independently accepted.
-
-| Metric | N=2 | N=8 |
-|---|---:|---:|
-| Constraints | 661 | 2,641 |
-| Setup | 54.18 ms | 204.938 ms |
-| Prove | 9.52 ms | 29.743 ms |
-| Verify | 0.50 ms | 0.615 ms |
-
-Each timing is a single observed invocation, not a statistical average or a claim about production throughput or statistical scaling. The N=8 common-sample process-group RSS peak was **21,484 KiB**; finite sampling does not establish the lifetime peak or a hard memory limit. Experiment tooling and acceptance conditions are described in the [CPU tooling README](tools/bench/README.md).
-
 ## Quick Start
 
 Run the real local demo from the repository root on **Linux/WSL**:
@@ -108,5 +89,3 @@ A build check neither starts the demo nor provisions runtime materials. Starting
 ## Scope and Limitations
 
 The runtime uses one Coordinator and multiple Workers, with SQLite-backed job state and restart recovery; multi-Coordinator high availability is not supported. AttemptIDs and leases govern result acceptance. Old computation can overlap a retry, so result fencing does not guarantee exactly-once execution: performing a computation and accepting its result are separate events.
-
-The production ZK workload is a Groth16 proof of a MiMC preimage relation on BN254. MiMC Chain is a separate experiment: N=2 and N=8 have completed CPU pilots, while N=32 has compile-only calibration. These experimental timings describe individual observed operations, not production-system throughput.

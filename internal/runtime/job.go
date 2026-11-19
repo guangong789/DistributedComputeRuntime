@@ -1,48 +1,18 @@
 package runtime
 
-import (
-	"errors"
-	"time"
-)
-
-var ErrExecutorNotRunning = errors.New("executor is not running")
-var ErrInvalidJob = errors.New("invalid job")
-var ErrInvalidJobTransition = errors.New("invalid job state transition")
-var ErrDuplicateJobID = errors.New("duplicate job id")
-var ErrJobNotFound = errors.New("job not found")
+import "time"
 
 type JobStatus int
 
 const (
-	JobPending JobStatus = iota
-	JobRunning
+	JobRunning JobStatus = iota + 1
 	JobSucceeded
 	JobFailed
 	JobCancelled
 )
 
-func validTransition(from, to JobStatus) bool {
-	switch from {
-	case JobPending:
-		return to == JobRunning || to == JobCancelled
-
-	case JobRunning:
-		return to == JobSucceeded ||
-			to == JobFailed ||
-			to == JobCancelled
-
-	case JobSucceeded, JobFailed, JobCancelled:
-		return false
-
-	default:
-		return false
-	}
-}
-
 func (s JobStatus) String() string {
 	switch s {
-	case JobPending:
-		return "Pending"
 	case JobRunning:
 		return "Running"
 	case JobSucceeded:
@@ -69,11 +39,3 @@ type Result struct {
 	Output string
 	Err    error
 }
-
-type ExecutorState int
-
-const (
-	ExecutorRunning ExecutorState = iota
-	ExecutorShuttingDown
-	ExecutorStopped
-)
