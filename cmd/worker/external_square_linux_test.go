@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,6 +64,23 @@ func externalSquareFixture() int {
 		fmt.Fprint(os.Stderr, strings.Repeat("x", 4096))
 	case "6\n":
 		return holdComputeFixture()
+	case "7\n":
+		if os.WriteFile("ready", []byte(strconv.Itoa(os.Getpid())), 0600) != nil {
+			return 92
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			_, err := os.Stat("release")
+			if err == nil {
+				fmt.Fprintln(os.Stdout, "49")
+				return 0
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return 95
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return 96
 	default:
 		return 94
 	}
@@ -170,6 +188,75 @@ func awaitExternalSquareMarker(t *testing.T, dir, name string) int {
 	}
 	t.Fatalf("child did not publish %s marker", name)
 	return 0
+}
+
+func TestWorkerExternalSquareSurvivesThreadExit(t *testing.T) {
+	worker, dir := externalSquareWorker(t, externalcompute.NewSlot())
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	type response struct {
+		reply *runtimepb.ExecuteJobResponse
+		err   error
+	}
+	done := make(chan response, 1)
+	go func() {
+		reply, err := worker.ExecuteJob(ctx, externalSquareRequest("7", 6000))
+		done <- response{reply, err}
+	}()
+	pid := awaitExternalSquareMarker(t, dir, "ready")
+	original, state, err := readComputeChild(pid)
+	if err != nil || state == "Z" {
+		t.Fatalf("compute child did not start: state=%s err=%v", state, err)
+	}
+
+	// Keep both goroutines locked until their TIDs are known so at least one
+	// uses a non-leader thread. Returning without unlocking retires that thread.
+	tids := make(chan int, 2)
+	retire := make(chan struct{})
+	for range cap(tids) {
+		go func() {
+			runtime.LockOSThread()
+			tid := syscall.Gettid()
+			tids <- tid
+			<-retire
+			if tid == os.Getpid() {
+				runtime.UnlockOSThread()
+			}
+		}()
+	}
+	threads := []int{<-tids, <-tids}
+	close(retire)
+	for _, tid := range threads {
+		if tid == os.Getpid() {
+			continue
+		}
+		path := fmt.Sprintf("/proc/self/task/%d", tid)
+		for {
+			_, err := os.Stat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("unrelated thread %d did not retire: %v", tid, ctx.Err())
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}
+	current, state, err := readComputeChild(pid)
+	if err != nil || current != original || state == "Z" {
+		t.Fatalf("compute child did not survive unrelated thread exit: state=%s err=%v", state, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := awaitWorker(t, done)
+	if got.err != nil || got.reply.GetStatus() != "Succeeded" || got.reply.GetOutput() != "49" {
+		t.Fatalf("ExecuteJob returned %v, %v", got.reply, got.err)
+	}
 }
 
 func TestWorkerExternalSquareLifecycle(t *testing.T) {

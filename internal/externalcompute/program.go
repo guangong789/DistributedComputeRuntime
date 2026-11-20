@@ -78,7 +78,7 @@ func (p *Program) Run(ctx context.Context, input string, verify func(string) (st
 
 	// Run owns the sole Wait and its I/O joins. Keep the slot while the child
 	// is still being reaped, even if the RPC or Worker shutdown budget expires.
-	runErr := cmd.Run()
+	runErr := runCommand(cmd)
 	var exit *exec.ExitError
 	exitedWithError := errors.As(runErr, &exit)
 	if err := ctx.Err(); err != nil {

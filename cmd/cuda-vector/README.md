@@ -37,6 +37,8 @@ Worker slot. The Worker returns `FailedPrecondition` without the configured
 executable and `ResourceExhausted` when the slot is held. On cancellation, it
 requests SIGTERM, allows 300 ms before SIGKILL escalation, and holds the slot
 through reaping and I/O cleanup. A signal alone does not establish that a
-running kernel has stopped or GPU resources have been released. Deploy the
-executable as one process without descendants. GPU-aware placement and
-orphan prevention after Worker SIGKILL are outside this contract.
+running kernel has stopped or GPU resources have been released. The
+[direct-child parent-death protection](../external-square/README.md) also
+applies to this executable. Deploy it as one unprivileged process without
+descendants or credential changes. GPU-aware placement remains outside this
+contract.

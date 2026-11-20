@@ -26,8 +26,9 @@ one child at a time and returns `ResourceExhausted` while that slot is held.
 On cancellation it requests SIGTERM and allows 300 ms before escalating to
 SIGKILL. The handler and slot remain owned through direct-child reaping and I/O
 cleanup. The Worker shutdown deadline can expire before the OS completes that
-cleanup. Worker SIGKILL can leave a child alive.
-
-The executable must run as a single process without spawning descendants.
+cleanup. On Linux, the Worker installs a parent-death SIGKILL for its direct
+child. Use a single, unprivileged executable without descendants that does not
+clear the signal or change credentials. A set-ID or file-capability executable
+can clear this protection, and the signal gives no fixed deadline for exit.
 The child shares the Worker's OS privileges. The launch contract does not
 provide filesystem or network isolation.
