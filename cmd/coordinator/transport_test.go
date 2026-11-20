@@ -168,13 +168,14 @@ func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 	workerClient := &recordingCoordinatorClient{CoordinatorServiceClient: runtimepb.NewCoordinatorServiceClient(workerConn)}
 	ctx := mtlsContext(t)
 	// Unknown but authorized Worker recovers using the same client/connection.
-	if err := workerheartbeat.Send(ctx, workerClient, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address}); err != nil {
+	registration := workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address})
+	if err := registration.Send(ctx, workerClient); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(workerClient.heartbeatAccepted, []bool{false}) || len(workerClient.registrations) != 1 {
 		t.Fatal("unknown heartbeat did not trigger exactly one re-registration")
 	}
-	if err := workerheartbeat.Send(ctx, workerClient, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address}); err != nil {
+	if err := registration.Send(ctx, workerClient); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(workerClient.heartbeatAccepted, []bool{false, true}) || len(workerClient.registrations) != 1 {

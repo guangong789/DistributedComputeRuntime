@@ -142,7 +142,7 @@ func (p *coordinatorProcess) startBackground() {
 	p.background.Add(2)
 	go func() {
 		defer p.background.Done()
-		p.service.runLivenessMonitor(p.service.lifecycle.ctx, time.Second, 3*time.Second)
+		p.service.runLivenessMonitor(p.service.lifecycle.ctx, time.Second, workerLivenessTimeout)
 	}()
 	go func() {
 		defer p.background.Done()

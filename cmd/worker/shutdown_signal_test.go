@@ -55,7 +55,7 @@ func TestWorkerSignalSubprocess(t *testing.T) {
 	}
 	service := shutdownCoordinator{
 		register: func(context.Context, *runtimepb.RegisterWorkerRequest) (*runtimepb.RegisterWorkerResponse, error) {
-			return &runtimepb.RegisterWorkerResponse{Accepted: true}, nil
+			return &runtimepb.RegisterWorkerResponse{Accepted: true, SessionToken: make([]byte, 32)}, nil
 		},
 		heartbeat: func(context.Context, *runtimepb.HeartbeatRequest) (*runtimepb.HeartbeatResponse, error) {
 			return &runtimepb.HeartbeatResponse{Accepted: true}, nil

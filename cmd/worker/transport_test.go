@@ -176,7 +176,8 @@ func TestWorkerMTLSRegistrationAndHeartbeatReuse(t *testing.T) {
 	}
 	const advertised = "worker.example:50051"
 	// Exercise the actual initial-registration path and its three-second timeout.
-	if err := registerWithCoordinator(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: advertised}, address, transport); err != nil {
+	registration := workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: advertised})
+	if err := registerWithCoordinator(context.Background(), registration, address, transport); err != nil {
 		t.Fatal(err)
 	}
 	// Exercise the actual connection constructor used by runHeartbeat; retain this
@@ -190,20 +191,20 @@ func TestWorkerMTLSRegistrationAndHeartbeatReuse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("identity", "spiffe://distributedzk.local/worker/worker-b", "worker-id", "worker-b"))
-	if err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: advertised}); err != nil {
+	if err := registration.Send(ctx, client); err != nil {
 		t.Fatal(err)
 	}
 	service.mu.Lock()
 	service.registered = false
 	service.mu.Unlock()
-	if err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: advertised}); err != nil {
+	if err := registration.Send(ctx, client); err != nil {
 		t.Fatal(err)
 	}
-	if err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: advertised}); err != nil {
+	if err := registration.Send(ctx, client); err != nil {
 		t.Fatal(err)
 	}
 	// Certificate Worker A cannot use even the startup helper to impersonate B.
-	if err := registerWithCoordinator(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: "worker-b", Address: advertised}, address, transport); status.Code(err) != codes.PermissionDenied {
+	if err := registerWithCoordinator(context.Background(), workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: "worker-b", Address: advertised}), address, transport); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("WorkerID impersonation: %v", err)
 	}
 	service.mu.Lock()
@@ -231,7 +232,7 @@ func TestWorkerMTLSRejectsWrongCoordinatorEndpoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := registerWithCoordinator(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "worker.example:50051"}, address, transport); err == nil {
+			if err := registerWithCoordinator(context.Background(), workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "worker.example:50051"}), address, transport); err == nil {
 				t.Fatal("wrong Coordinator endpoint accepted")
 			}
 			service.mu.Lock()

@@ -25,10 +25,11 @@ type CoordinatorServer struct {
 	runtimepb.UnimplementedCoordinatorServiceServer
 
 	// mu protects the worker registry, round-robin cursor, attempts, leases, and active jobs.
-	mu          sync.Mutex
-	workers     map[string]WorkerInfo
-	workerOrder []string
-	nextWorker  int
+	mu             sync.Mutex
+	workers        map[string]WorkerInfo
+	workerSessions map[string]workerRegistrationSession // guarded by mu; never used for dispatch
+	workerOrder    []string
+	nextWorker     int
 
 	jobAttempts map[int64]int64
 	leases      map[int64]JobLease

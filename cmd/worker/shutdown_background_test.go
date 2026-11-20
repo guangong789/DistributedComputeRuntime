@@ -11,6 +11,7 @@ import (
 
 	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
 	"github.com/guangong789/DistributedComputeRuntime/internal/testutil/testpki"
+	"github.com/guangong789/DistributedComputeRuntime/internal/workerheartbeat"
 	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -109,7 +110,7 @@ func TestWorkerHeartbeatCancellationClosesConnection(t *testing.T) {
 	result := make(chan error, 1)
 	transport := shutdownClientCredentials(t, ca, address)
 	go func() {
-		result <- runHeartbeat(ctx, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "localhost:50051"}, address, transport)
+		result <- runHeartbeat(ctx, workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "localhost:50051"}), address, transport)
 	}()
 	awaitWorker(t, entered)
 	cancel()

@@ -29,7 +29,7 @@ func TestWorkerCapabilityAdvertisement(t *testing.T) {
 				register: func(ctx context.Context, req *runtimepb.RegisterWorkerRequest) (*runtimepb.RegisterWorkerResponse, error) {
 					select {
 					case registrations <- req:
-						return &runtimepb.RegisterWorkerResponse{Accepted: true}, nil
+						return &runtimepb.RegisterWorkerResponse{Accepted: true, SessionToken: make([]byte, 32)}, nil
 					case <-ctx.Done():
 						return nil, ctx.Err()
 					}
@@ -54,8 +54,8 @@ func TestWorkerCapabilityAdvertisement(t *testing.T) {
 			for _, phase := range []string{"initial registration", "heartbeat re-registration"} {
 				got := awaitWorker(t, registrations)
 				if got.GetWorkerId() != cfg.ID || got.GetAddress() != cfg.AdvertiseAddress ||
-					!slices.Equal(got.GetExternalTaskTypes(), tc.want) {
-					t.Errorf("%s=%v, want %v", phase, got, tc.want)
+					!slices.Equal(got.GetExternalTaskTypes(), tc.want) || len(got.GetRegistrationKey()) != 32 {
+					t.Errorf("%s sent unexpected identity or capabilities", phase)
 				}
 			}
 			cancel()

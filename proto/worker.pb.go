@@ -242,8 +242,13 @@ type RegisterWorkerRequest struct {
 	Address  string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
 	// Trusted external workloads configured at startup. Built-ins are implicit.
 	ExternalTaskTypes []string `protobuf:"bytes,3,rep,name=external_task_types,json=externalTaskTypes,proto3" json:"external_task_types,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Private 32-byte random key created once per process. Absent for legacy
+	// Workers. Permits idempotent retries if a registration reply was lost.
+	RegistrationKey []byte `protobuf:"bytes,4,opt,name=registration_key,json=registrationKey,proto3" json:"registration_key,omitempty"`
+	// Last accepted Coordinator token, if any.
+	SessionToken  []byte `protobuf:"bytes,5,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
@@ -297,10 +302,25 @@ func (x *RegisterWorkerRequest) GetExternalTaskTypes() []string {
 	return nil
 }
 
+func (x *RegisterWorkerRequest) GetRegistrationKey() []byte {
+	if x != nil {
+		return x.RegistrationKey
+	}
+	return nil
+}
+
+func (x *RegisterWorkerRequest) GetSessionToken() []byte {
+	if x != nil {
+		return x.SessionToken
+	}
+	return nil
+}
+
 type RegisterWorkerResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	SessionToken  []byte                 `protobuf:"bytes,3,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -347,6 +367,13 @@ func (x *RegisterWorkerResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *RegisterWorkerResponse) GetSessionToken() []byte {
+	if x != nil {
+		return x.SessionToken
+	}
+	return nil
 }
 
 type SubmitJobRequest struct {
@@ -496,6 +523,7 @@ func (x *SubmitJobResponse) GetAttemptId() int64 {
 type HeartbeatRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	SessionToken  []byte                 `protobuf:"bytes,2,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -535,6 +563,13 @@ func (x *HeartbeatRequest) GetWorkerId() string {
 		return x.WorkerId
 	}
 	return ""
+}
+
+func (x *HeartbeatRequest) GetSessionToken() []byte {
+	if x != nil {
+		return x.SessionToken
+	}
+	return nil
 }
 
 type HeartbeatResponse struct {
@@ -739,14 +774,17 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1d\n" +
 	"\n" +
-	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"~\n" +
+	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"\xce\x01\n" +
 	"\x15RegisterWorkerRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12.\n" +
-	"\x13external_task_types\x18\x03 \x03(\tR\x11externalTaskTypes\"J\n" +
+	"\x13external_task_types\x18\x03 \x03(\tR\x11externalTaskTypes\x12)\n" +
+	"\x10registration_key\x18\x04 \x01(\fR\x0fregistrationKey\x12#\n" +
+	"\rsession_token\x18\x05 \x01(\fR\fsessionToken\"o\n" +
 	"\x16RegisterWorkerResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\x7f\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12#\n" +
+	"\rsession_token\x18\x03 \x01(\fR\fsessionToken\"\x7f\n" +
 	"\x10SubmitJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
 	"\ttask_type\x18\x02 \x01(\tR\btaskType\x12\x18\n" +
@@ -759,9 +797,10 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1d\n" +
 	"\n" +
-	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"/\n" +
+	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"T\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
-	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"/\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12#\n" +
+	"\rsession_token\x18\x02 \x01(\fR\fsessionToken\"/\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\"&\n" +
 	"\rGetJobRequest\x12\x15\n" +

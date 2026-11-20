@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"fmt"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
 	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
 	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type WorkerStatus int
@@ -18,6 +22,13 @@ const (
 	WorkerAlive WorkerStatus = iota
 	WorkerDead
 )
+
+const workerLivenessTimeout = 3 * time.Second
+const workerSessionSecretSize = 32
+
+type workerRegistrationSession struct {
+	key, token [workerSessionSecretSize]byte
+}
 
 type WorkerInfo struct {
 	ID            string
@@ -68,6 +79,12 @@ func (s *CoordinatorServer) RegisterWorker(
 		return &runtimepb.RegisterWorkerResponse{Accepted: false, Error: "invalid Worker TCP endpoint"}, nil
 	}
 
+	key, token := req.GetRegistrationKey(), req.GetSessionToken()
+	if (len(key) != 0 && len(key) != workerSessionSecretSize) ||
+		(len(token) != 0 && (len(key) == 0 || len(token) != workerSessionSecretSize)) {
+		return nil, status.Error(codes.InvalidArgument, "invalid Worker registration proof")
+	}
+
 	var externalTasks externalTaskSet
 	for _, taskType := range req.GetExternalTaskTypes() {
 		externalTasks |= externalTaskCapability(taskType)
@@ -80,6 +97,15 @@ func (s *CoordinatorServer) RegisterWorker(
 	}
 
 	previous, exists := s.workers[req.WorkerId]
+	session, retry, err := s.claimWorkerRegistrationLocked(previous, exists, req, externalTasks)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if retry {
+		s.mu.Unlock()
+		return &runtimepb.RegisterWorkerResponse{Accepted: true, SessionToken: session}, nil
+	}
 
 	s.workers[req.WorkerId] = WorkerInfo{
 		ID:            req.WorkerId,
@@ -110,9 +136,43 @@ func (s *CoordinatorServer) RegisterWorker(
 		req.Address,
 	)
 
-	return &runtimepb.RegisterWorkerResponse{
-		Accepted: true,
-	}, nil
+	return &runtimepb.RegisterWorkerResponse{Accepted: true, SessionToken: session}, nil
+}
+
+// The caller publishes the endpoint and capabilities under the same lock.
+func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, exists bool, req *runtimepb.RegisterWorkerRequest, tasks externalTaskSet) (token []byte, retry bool, err error) {
+	key, priorToken := req.GetRegistrationKey(), req.GetSessionToken()
+	current, owned := s.workerSessions[req.WorkerId]
+	if len(key) == 0 {
+		if owned {
+			return nil, false, status.Error(codes.FailedPrecondition, "Worker registration requires a session")
+		}
+		return nil, false, nil
+	}
+	if owned && subtle.ConstantTimeCompare(current.key[:], key) == 1 {
+		// A reply can be lost after publication, including during reconnect.
+		// Repeating a claim only returns its token, without renewing liveness.
+		if previous.Address != req.Address || previous.externalTasks != tasks {
+			return nil, false, status.Error(codes.InvalidArgument, "Worker registration changed within a session")
+		}
+		return current.token[:], true, nil
+	}
+	if exists && len(priorToken) != 0 {
+		return nil, false, status.Error(codes.FailedPrecondition, "Worker registration session revoked")
+	}
+	if exists && time.Since(previous.LastSeen) <= workerLivenessTimeout {
+		return nil, false, status.Error(codes.AlreadyExists, "Worker registration is live")
+	}
+	var next workerRegistrationSession
+	copy(next.key[:], key)
+	if _, err := rand.Read(next.token[:]); err != nil {
+		return nil, false, status.Error(codes.Internal, "cannot create Worker registration session")
+	}
+	if s.workerSessions == nil {
+		s.workerSessions = make(map[string]workerRegistrationSession)
+	}
+	s.workerSessions[req.WorkerId] = next
+	return next.token[:], false, nil
 }
 
 // hasEligibleWorker is a non-reserving precheck and leaves the cursor alone.
@@ -169,6 +229,12 @@ func (s *CoordinatorServer) Heartbeat(
 		}, nil
 	}
 
+	session, owned := s.workerSessions[req.WorkerId]
+	if (owned && subtle.ConstantTimeCompare(session.token[:], req.GetSessionToken()) != 1) ||
+		(!owned && len(req.GetSessionToken()) != 0) {
+		s.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "Worker registration session revoked")
+	}
 	previousState := worker.Status
 	worker.LastSeen = time.Now()
 	worker.Status = WorkerAlive

@@ -307,7 +307,7 @@ func TestCapabilityRecoveryAndReregistration(t *testing.T) {
 	waitRecoveryReset(t, clock, time.Second)
 	registration := &runtimepb.RegisterWorkerRequest{WorkerId: worker.ID, Address: worker.Address,
 		ExternalTaskTypes: []string{cudavector.TaskType}}
-	if err := workerheartbeat.Send(t.Context(), client, registration); err != nil {
+	if err := workerheartbeat.NewRegistration(registration).Send(t.Context(), client); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.heartbeatAccepted) != 1 || client.heartbeatAccepted[0] || len(client.registrations) != 1 ||

@@ -71,7 +71,7 @@ func TestSendHeartbeat(t *testing.T) {
 					return &runtimepb.RegisterWorkerResponse{Accepted: tc.registrationAccepted, Error: "registration denied"}, nil
 				},
 			}
-			err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: address})
+			err := workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: address}).Send(ctx, client)
 			switch {
 			case tc.wantRPCError != nil:
 				if err != tc.wantRPCError {

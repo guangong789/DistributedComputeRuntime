@@ -42,11 +42,17 @@ message RegisterWorkerRequest {
     string address = 2;
     // Trusted external workloads configured at startup. Built-ins are implicit.
     repeated string external_task_types = 3;
+    // Private 32-byte random key created once per process. Absent for legacy
+    // Workers. Permits idempotent retries if a registration reply was lost.
+    bytes registration_key = 4;
+    // Last accepted Coordinator token, if any.
+    bytes session_token = 5;
 }
 
 message RegisterWorkerResponse {
     bool accepted = 1;
     string error = 2;
+    bytes session_token = 3;
 }
 
 message SubmitJobRequest {
@@ -66,6 +72,7 @@ message SubmitJobResponse {
 
 message HeartbeatRequest {
   string worker_id = 1;
+  bytes session_token = 2;
 }
 
 message HeartbeatResponse {

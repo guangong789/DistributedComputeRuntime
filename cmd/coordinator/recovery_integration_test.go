@@ -139,7 +139,8 @@ func TestWorkerRecoversAfterCoordinatorStateLoss(t *testing.T) {
 		CoordinatorServiceClient: startTestCoordinator(t, restartedCoordinator),
 	}
 
-	if err := workerheartbeat.Send(ctx, recoveryClient, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: workerAddress}); err != nil {
+	heartbeatRegistration := workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: workerAddress})
+	if err := heartbeatRegistration.Send(ctx, recoveryClient); err != nil {
 		t.Fatalf("heartbeat recovery: %v", err)
 	}
 	if len(recoveryClient.heartbeatAccepted) != 1 || recoveryClient.heartbeatAccepted[0] {
@@ -168,7 +169,7 @@ func TestWorkerRecoversAfterCoordinatorStateLoss(t *testing.T) {
 	}
 
 	beforeHeartbeat := time.Now()
-	if err := workerheartbeat.Send(ctx, recoveryClient, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: workerAddress}); err != nil {
+	if err := heartbeatRegistration.Send(ctx, recoveryClient); err != nil {
 		t.Fatalf("post-recovery heartbeat: %v", err)
 	}
 	if len(recoveryClient.heartbeatAccepted) != 2 ||
@@ -352,7 +353,7 @@ func TestSQLiteRestartRecoversJobAfterWorkerReregistration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: worker.Address}); err != nil {
+	if err := workerheartbeat.NewRegistration(&runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: worker.Address}).Send(ctx, client); err != nil {
 		t.Fatalf("worker heartbeat and re-registration: %v", err)
 	}
 	if len(client.heartbeatAccepted) != 1 || client.heartbeatAccepted[0] ||
