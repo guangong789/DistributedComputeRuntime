@@ -40,6 +40,8 @@ service CoordinatorService {
 message RegisterWorkerRequest {
     string worker_id = 1;
     string address = 2;
+    // Trusted external workloads configured at startup. Built-ins are implicit.
+    repeated string external_task_types = 3;
 }
 
 message RegisterWorkerResponse {

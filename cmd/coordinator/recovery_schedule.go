@@ -90,6 +90,19 @@ func (q *recoverySchedule) recheck(r JobRecord) {
 	q.entries[r.JobID] = e
 }
 
+// backOff spaces out failed recovery executions and passes without eligible
+// Workers. Waiting for a Worker does not itself execute an Attempt.
+func (q *recoverySchedule) backOff(id, generation int64, specHash [32]byte) {
+	e := q.entries[id]
+	if e.specHash != specHash {
+		e = retryEntry{}
+	}
+	e.failures = incrementRecoveryFailures(e.failures)
+	e.generation, e.specHash = generation, specHash
+	e.nextRetry = q.now().Add(recoveryBackoff(e.failures, q.sample))
+	q.entries[id] = e
+}
+
 func (q *recoverySchedule) completed(store JobStore, snapshot JobRecord, result recoveryExecution, executionErr error) error {
 	if result.terminal || result.reconciliationPending {
 		// An unresolved session installed its ledger obligation before releasing
@@ -97,11 +110,6 @@ func (q *recoverySchedule) completed(store JobStore, snapshot JobRecord, result 
 		// Recovering scan creates a fresh eligible scheduling entry.
 		delete(q.entries, snapshot.JobID)
 		return nil
-	}
-	// Preserve only this session's history, not a later submission's generation.
-	e := q.entries[snapshot.JobID]
-	if e.specHash != result.specHash {
-		e = retryEntry{}
 	}
 	snapshot.AttemptID = result.generation
 	current, ok, err := store.Load(snapshot.JobID)
@@ -114,11 +122,8 @@ func (q *recoverySchedule) completed(store JobStore, snapshot JobRecord, result 
 		q.recheck(current)
 		return nil
 	}
-	if result.executed && executionErr != nil {
-		e.failures = incrementRecoveryFailures(e.failures)
-		e.generation, e.specHash = result.generation, result.specHash
-		e.nextRetry = q.now().Add(recoveryBackoff(e.failures, q.sample))
-		q.entries[snapshot.JobID] = e
+	if executionErr == errNoEligibleWorker || (result.executed && executionErr != nil) {
+		q.backOff(snapshot.JobID, result.generation, result.specHash)
 	} else {
 		q.recheck(snapshot)
 	}

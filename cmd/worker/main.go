@@ -145,8 +145,7 @@ func (s *WorkerService) ExecuteJob(
 
 func registerWithCoordinator(
 	parent context.Context,
-	workerID string,
-	workerAddress string,
+	registration *runtimepb.RegisterWorkerRequest,
 	coordinatorAddress string,
 	transport credentials.TransportCredentials,
 ) error {
@@ -167,13 +166,7 @@ func registerWithCoordinator(
 	)
 	defer cancel()
 
-	resp, err := client.RegisterWorker(
-		ctx,
-		&runtimepb.RegisterWorkerRequest{
-			WorkerId: workerID,
-			Address:  workerAddress,
-		},
-	)
+	resp, err := client.RegisterWorker(ctx, registration)
 	if err != nil {
 		return err
 	}
@@ -190,8 +183,7 @@ func registerWithCoordinator(
 
 func runHeartbeat(
 	parent context.Context,
-	workerID string,
-	workerAddress string,
+	registration *runtimepb.RegisterWorkerRequest,
 	coordinatorAddress string,
 	transport credentials.TransportCredentials,
 ) error {
@@ -223,7 +215,7 @@ func runHeartbeat(
 			500*time.Millisecond,
 		)
 
-		err := workerheartbeat.Send(ctx, client, workerID, workerAddress)
+		err := workerheartbeat.Send(ctx, client, registration)
 		cancel()
 
 		if err != nil && parent.Err() == nil {
@@ -390,12 +382,20 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	p.start(server, listener)
 	publish()
 	fmt.Printf("worker %s listening on %s\n", cfg.ID, listener.Addr())
-	if err := registerWithCoordinator(ctx, cfg.ID, cfg.AdvertiseAddress, cfg.CoordinatorAddress, transport.client); err != nil {
+	// Both registration paths use this immutable snapshot of validated configuration.
+	registration := &runtimepb.RegisterWorkerRequest{WorkerId: cfg.ID, Address: cfg.AdvertiseAddress}
+	if service.externalSquare != nil {
+		registration.ExternalTaskTypes = append(registration.ExternalTaskTypes, externalsquare.TaskType)
+	}
+	if service.cudaVector != nil {
+		registration.ExternalTaskTypes = append(registration.ExternalTaskTypes, cudavector.TaskType)
+	}
+	if err := registerWithCoordinator(ctx, registration, cfg.CoordinatorAddress, transport.client); err != nil {
 		return fmt.Errorf("register with coordinator: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	fmt.Println("worker registered successfully")
-	return runHeartbeat(ctx, cfg.ID, cfg.AdvertiseAddress, cfg.CoordinatorAddress, transport.client)
+	return runHeartbeat(ctx, registration, cfg.CoordinatorAddress, transport.client)
 }

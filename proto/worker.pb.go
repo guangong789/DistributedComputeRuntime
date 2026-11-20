@@ -237,11 +237,13 @@ func (x *ExecuteJobResponse) GetAttemptId() int64 {
 }
 
 type RegisterWorkerRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Address  string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	// Trusted external workloads configured at startup. Built-ins are implicit.
+	ExternalTaskTypes []string `protobuf:"bytes,3,rep,name=external_task_types,json=externalTaskTypes,proto3" json:"external_task_types,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
@@ -286,6 +288,13 @@ func (x *RegisterWorkerRequest) GetAddress() string {
 		return x.Address
 	}
 	return ""
+}
+
+func (x *RegisterWorkerRequest) GetExternalTaskTypes() []string {
+	if x != nil {
+		return x.ExternalTaskTypes
+	}
+	return nil
 }
 
 type RegisterWorkerResponse struct {
@@ -730,10 +739,11 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1d\n" +
 	"\n" +
-	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"N\n" +
+	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"~\n" +
 	"\x15RegisterWorkerRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress\"J\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12.\n" +
+	"\x13external_task_types\x18\x03 \x03(\tR\x11externalTaskTypes\"J\n" +
 	"\x16RegisterWorkerResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\"\x7f\n" +

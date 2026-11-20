@@ -108,7 +108,9 @@ func TestWorkerHeartbeatCancellationClosesConnection(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	transport := shutdownClientCredentials(t, ca, address)
-	go func() { result <- runHeartbeat(ctx, "worker-a", "localhost:50051", address, transport) }()
+	go func() {
+		result <- runHeartbeat(ctx, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: "localhost:50051"}, address, transport)
+	}()
 	awaitWorker(t, entered)
 	cancel()
 	if err := awaitWorker(t, result); !errors.Is(err, context.Canceled) {

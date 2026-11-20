@@ -51,7 +51,7 @@ func TestAuthorizedAttemptUsesPublishedGeneration(t *testing.T) {
 				t.Fatal("cannot claim job")
 			}
 			defer s.releaseJob(stored.JobID)
-			worker, _ := s.getNextWorker()
+			worker, _ := s.getNextWorker("hash")
 			const leaseDuration = time.Minute
 			var id int64
 			var err error
@@ -155,7 +155,7 @@ func TestAuthorizedAttemptLeavesPolicyToSession(t *testing.T) {
 				t.Fatal("cannot claim job")
 			}
 			defer s.releaseJob(stored.JobID)
-			worker, _ := s.getNextWorker()
+			worker, _ := s.getNextWorker("hash")
 			id, err := s.admitJobAttempt(stored, worker.ID, time.Minute)
 			if err != nil {
 				t.Fatal(err)

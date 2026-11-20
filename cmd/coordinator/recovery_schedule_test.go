@@ -302,7 +302,7 @@ func TestRecoverySchedulerNoWorkerAndOwnershipRecheck(t *testing.T) {
 			if owned {
 				wantFailures = 0
 			}
-			if e.failures != wantFailures || !e.nextRetry.Equal(c.now().Add(time.Second)) || len(s.jobAttempts) != 0 || len(s.leases) != 0 || observer.count("started", "") != 0 || observer.count("recovery_failed", "") != int(wantFailures) {
+			if e.failures != wantFailures || !e.nextRetry.Equal(c.now().Add(time.Second)) || len(s.jobAttempts) != 0 || len(s.leases) != 0 || observer.count("started", "") != 0 || observer.count("recovery_failed", "") != 0 || observer.count("execution", "") != 0 {
 				t.Fatalf("entry=%+v metrics=%+v", e, observer.snapshot())
 			}
 			s.releaseJob(r.JobID)

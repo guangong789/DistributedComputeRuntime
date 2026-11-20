@@ -121,7 +121,7 @@ func TestRegistrationSignalsRecoveryWithoutBlocking(t *testing.T) {
 				t.Fatal("readiness signals were not coalesced")
 			}
 		}
-		worker, ok := s.getNextWorker()
+		worker, ok := s.getNextWorker("hash")
 		if !ok || worker.Status != WorkerAlive || len(s.workerOrder) != 1 {
 			t.Fatal("registration did not leave one alive worker")
 		}

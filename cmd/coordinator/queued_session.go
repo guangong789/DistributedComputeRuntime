@@ -82,9 +82,12 @@ func (s *CoordinatorServer) runClaimedQueuedJob(ctx context.Context, jobID int64
 	}
 	observer := metrics.Resolve(s.metrics)
 	start := time.Now()
-	defer func() { observer.ObserveJobExecution(metrics.SourceSubmit, time.Since(start)) }()
 	session := s.executeAttemptSession(ctx, jobSpecFromRecord(queued), metrics.SourceSubmit,
 		attemptSessionStart{mode: startPersistedQueuedJob, queued: queued})
+	if session.err == errNoEligibleWorker {
+		return session.err
+	}
+	defer func() { observer.ObserveJobExecution(metrics.SourceSubmit, time.Since(start)) }()
 	if session.err == nil {
 		return nil // The shared engine confirmed terminal persistence.
 	}

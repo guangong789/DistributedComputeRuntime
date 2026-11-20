@@ -173,6 +173,9 @@ type attemptSessionStart struct {
 	queued JobRecord // exact durable snapshot; only used by startPersistedQueuedJob
 }
 
+// Only emitted when selection is empty before any Attempt is published.
+var errNoEligibleWorker = status.Error(codes.Unavailable, "no eligible workers available")
+
 type attemptSessionResult struct {
 	terminal           *acceptedJobResult
 	lastPublished      *JobRecord
@@ -207,7 +210,7 @@ func (s *CoordinatorServer) executeAttemptSession(
 			return session
 		}
 
-		worker, ok := s.getNextWorker()
+		worker, ok := s.getNextWorker(spec.TaskType)
 		if !ok {
 			break
 		}
@@ -273,7 +276,7 @@ func (s *CoordinatorServer) executeAttemptSession(
 		}
 		return session
 	}
-	session.err = status.Error(codes.Unavailable, "no alive workers available")
+	session.err = errNoEligibleWorker
 	return session
 }
 

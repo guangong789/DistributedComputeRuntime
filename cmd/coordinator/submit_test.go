@@ -28,6 +28,11 @@ func (w *testWorker) ExecuteJob(ctx context.Context, req *runtimepb.ExecuteJobRe
 
 func registerTestWorker(t *testing.T, s *CoordinatorServer, id string, execute func(context.Context, *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error), options ...grpc.ServerOption) {
 	t.Helper()
+	registerTestWorkerWithCapabilities(t, s, id, nil, execute, options...)
+}
+
+func registerTestWorkerWithCapabilities(t *testing.T, s *CoordinatorServer, id string, externalTaskTypes []string, execute func(context.Context, *runtimepb.ExecuteJobRequest) (*runtimepb.ExecuteJobResponse, error), options ...grpc.ServerOption) {
+	t.Helper()
 	useTestWorkerTransport(s)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -37,7 +42,7 @@ func registerTestWorker(t *testing.T, s *CoordinatorServer, id string, execute f
 	runtimepb.RegisterWorkerServiceServer(server, &testWorker{execute: execute})
 	go server.Serve(listener)
 	t.Cleanup(server.Stop)
-	resp, err := s.RegisterWorker(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: id, Address: listener.Addr().String()})
+	resp, err := s.RegisterWorker(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: id, Address: listener.Addr().String(), ExternalTaskTypes: externalTaskTypes})
 	if err != nil || !resp.Accepted {
 		t.Fatalf("registration: response=%v error=%v", resp, err)
 	}
@@ -339,7 +344,7 @@ func TestWorkerRegistrationLivenessAndRoundRobin(t *testing.T) {
 		t.Fatal("re-registration duplicated worker order")
 	}
 	for _, want := range []string{"a", "b", "a", "b"} {
-		worker, ok := s.getNextWorker()
+		worker, ok := s.getNextWorker("hash")
 		if !ok || worker.ID != want {
 			t.Fatalf("round robin got %+v, want %s", worker, want)
 		}
@@ -351,7 +356,7 @@ func TestWorkerRegistrationLivenessAndRoundRobin(t *testing.T) {
 	s.mu.Unlock()
 	s.checkWorkerLiveness(time.Minute)
 	for i := 0; i < 3; i++ {
-		worker, ok := s.getNextWorker()
+		worker, ok := s.getNextWorker("hash")
 		if !ok || worker.ID != "b" {
 			t.Fatalf("selected dead worker: %+v", worker)
 		}
@@ -404,7 +409,7 @@ func TestConcurrentWorkerOperations(t *testing.T) {
 			s.RegisterWorker(context.Background(), &runtimepb.RegisterWorkerRequest{WorkerId: "worker", Address: "localhost:1234"})
 			s.Heartbeat(context.Background(), &runtimepb.HeartbeatRequest{WorkerId: "worker"})
 			s.checkWorkerLiveness(time.Minute)
-			s.getNextWorker()
+			s.getNextWorker("hash")
 		}()
 	}
 	wg.Wait()

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/guangong789/DistributedComputeRuntime/internal/cudavector"
+	"github.com/guangong789/DistributedComputeRuntime/internal/externalsquare"
 	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
 	"github.com/guangong789/DistributedComputeRuntime/internal/rpcauth"
 	runtimepb "github.com/guangong789/DistributedComputeRuntime/proto"
@@ -18,10 +20,37 @@ const (
 )
 
 type WorkerInfo struct {
-	ID       string
-	Address  string
-	LastSeen time.Time
-	Status   WorkerStatus
+	ID            string
+	Address       string
+	LastSeen      time.Time
+	Status        WorkerStatus
+	externalTasks externalTaskSet
+}
+
+// A value set keeps endpoint and capability snapshots self-contained.
+type externalTaskSet uint8
+
+const (
+	externalSquareCapability externalTaskSet = 1 << iota
+	cudaVectorCapability
+)
+
+func externalTaskCapability(taskType string) externalTaskSet {
+	switch taskType {
+	case externalsquare.TaskType:
+		return externalSquareCapability
+	case cudavector.TaskType:
+		return cudaVectorCapability
+	default:
+		return 0
+	}
+}
+
+func (w WorkerInfo) eligibleFor(taskType string) bool {
+	required := externalTaskCapability(taskType)
+	// Built-ins require no advertisement. Other task names still use the
+	// Worker's existing execution-time validation; unknown ads grant nothing.
+	return w.Status == WorkerAlive && (required == 0 || w.externalTasks&required != 0)
 }
 
 func (s *CoordinatorServer) RegisterWorker(
@@ -39,6 +68,11 @@ func (s *CoordinatorServer) RegisterWorker(
 		return &runtimepb.RegisterWorkerResponse{Accepted: false, Error: "invalid Worker TCP endpoint"}, nil
 	}
 
+	var externalTasks externalTaskSet
+	for _, taskType := range req.GetExternalTaskTypes() {
+		externalTasks |= externalTaskCapability(taskType)
+	}
+
 	s.mu.Lock()
 
 	if s.workers == nil {
@@ -48,10 +82,11 @@ func (s *CoordinatorServer) RegisterWorker(
 	previous, exists := s.workers[req.WorkerId]
 
 	s.workers[req.WorkerId] = WorkerInfo{
-		ID:       req.WorkerId,
-		Address:  req.Address,
-		LastSeen: time.Now(),
-		Status:   WorkerAlive,
+		ID:            req.WorkerId,
+		Address:       req.Address,
+		LastSeen:      time.Now(),
+		Status:        WorkerAlive,
+		externalTasks: externalTasks,
 	}
 
 	if !exists {
@@ -80,7 +115,19 @@ func (s *CoordinatorServer) RegisterWorker(
 	}, nil
 }
 
-func (s *CoordinatorServer) getNextWorker() (WorkerInfo, bool) {
+// hasEligibleWorker is a non-reserving precheck and leaves the cursor alone.
+func (s *CoordinatorServer) hasEligibleWorker(taskType string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range s.workerOrder {
+		if worker, ok := s.workers[id]; ok && worker.eligibleFor(taskType) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *CoordinatorServer) getNextWorker(taskType string) (WorkerInfo, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -98,7 +145,7 @@ func (s *CoordinatorServer) getNextWorker() (WorkerInfo, bool) {
 			continue
 		}
 
-		if worker.Status != WorkerAlive {
+		if !worker.eligibleFor(taskType) {
 			continue
 		}
 

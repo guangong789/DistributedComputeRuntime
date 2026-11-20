@@ -332,7 +332,7 @@ func TestPrometheusMetricsWorkerTimeoutTransition(t *testing.T) {
 		s.checkWorkerLiveness(time.Second)
 	}
 	assertIntegrationCounter(t, scrapeIntegrationMetrics(t, endpoint.url), "dzkr_worker_state_transitions_total", labels, 1)
-	if _, alive := s.getNextWorker(); alive {
+	if _, alive := s.getNextWorker("hash"); alive {
 		t.Fatal("timed-out Worker remained schedulable")
 	}
 }

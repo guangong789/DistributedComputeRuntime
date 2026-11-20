@@ -77,8 +77,8 @@ func TestMetricsRecoverySourcesRetriesAndNoWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if observer.count("started", "") != 0 || observer.count("terminal", "") != 0 ||
-		observer.count("recovery_failed", string(metrics.FailureUnavailable)) != 1 ||
-		observer.count("pass", string(metrics.PassCompletedWithErrors)) != 1 {
+		observer.count("recovery_failed", "") != 0 || observer.count("execution", "") != 0 ||
+		observer.count("pass", string(metrics.PassCompleted)) != 1 {
 		t.Fatalf("no-worker fabricated lifecycle events: %+v", observer.snapshot())
 	}
 	assertRecoveryRecord(t, inner, record)
@@ -109,7 +109,7 @@ func TestMetricsRecoverySourcesRetriesAndNoWorker(t *testing.T) {
 	assertRecoveryRecord(t, inner, want)
 	if observer.count("submitted", "") != 0 || observer.count("started", "") != 3 ||
 		observer.count("finished", "") != 3 || observer.count("terminal", "") != 1 ||
-		observer.count("execution", "") != 3 || observer.count("pass", string(metrics.PassCompleted)) != 1 {
+		observer.count("execution", "") != 2 || observer.count("pass", string(metrics.PassCompleted)) != 2 {
 		t.Fatalf("duplicate lifecycle events=%+v", observer.snapshot())
 	}
 	for _, event := range observer.snapshot() {

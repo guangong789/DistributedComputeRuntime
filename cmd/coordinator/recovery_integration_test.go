@@ -139,7 +139,7 @@ func TestWorkerRecoversAfterCoordinatorStateLoss(t *testing.T) {
 		CoordinatorServiceClient: startTestCoordinator(t, restartedCoordinator),
 	}
 
-	if err := workerheartbeat.Send(ctx, recoveryClient, workerID, workerAddress); err != nil {
+	if err := workerheartbeat.Send(ctx, recoveryClient, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: workerAddress}); err != nil {
 		t.Fatalf("heartbeat recovery: %v", err)
 	}
 	if len(recoveryClient.heartbeatAccepted) != 1 || recoveryClient.heartbeatAccepted[0] {
@@ -168,7 +168,7 @@ func TestWorkerRecoversAfterCoordinatorStateLoss(t *testing.T) {
 	}
 
 	beforeHeartbeat := time.Now()
-	if err := workerheartbeat.Send(ctx, recoveryClient, workerID, workerAddress); err != nil {
+	if err := workerheartbeat.Send(ctx, recoveryClient, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: workerAddress}); err != nil {
 		t.Fatalf("post-recovery heartbeat: %v", err)
 	}
 	if len(recoveryClient.heartbeatAccepted) != 2 ||
@@ -201,7 +201,7 @@ func TestWorkerRecoversAfterCoordinatorStateLoss(t *testing.T) {
 		t.Fatalf("recovery duplicated worker order: %v", finalOrder)
 	}
 
-	selected, ok := restartedCoordinator.getNextWorker()
+	selected, ok := restartedCoordinator.getNextWorker("hash")
 	if !ok || selected.ID != workerID ||
 		selected.Address != workerAddress || selected.Status != WorkerAlive {
 		t.Fatalf("recovered worker is not schedulable: %+v found=%v", selected, ok)
@@ -352,7 +352,7 @@ func TestSQLiteRestartRecoversJobAfterWorkerReregistration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := workerheartbeat.Send(ctx, client, workerID, worker.Address); err != nil {
+	if err := workerheartbeat.Send(ctx, client, &runtimepb.RegisterWorkerRequest{WorkerId: workerID, Address: worker.Address}); err != nil {
 		t.Fatalf("worker heartbeat and re-registration: %v", err)
 	}
 	if len(client.heartbeatAccepted) != 1 || client.heartbeatAccepted[0] ||

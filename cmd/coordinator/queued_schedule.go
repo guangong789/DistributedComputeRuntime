@@ -7,7 +7,7 @@ import (
 )
 
 // Two complete queued sessions allow an unrelated job to progress alongside a
-// slow one without flooding the current Alive-only, round-robin Worker model.
+// slow one without flooding the round-robin Worker model.
 // This is a Coordinator resource bound, not a claim of Worker free capacity.
 // queuedSessionLimit follows leaseDuration's configure-before-start convention.
 const defaultQueuedSessionLimit = 2
@@ -56,31 +56,12 @@ func (s *CoordinatorServer) reserveQueuedSession(ctx context.Context, id int64) 
 	}, false
 }
 
-func (s *CoordinatorServer) hasEligibleWorker() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, id := range s.workerOrder {
-		if w, ok := s.workers[id]; ok && w.Status == WorkerAlive {
-			return true
-		}
-	}
-	return false
-}
-
 // Only the existing discovery producer accesses q. Goroutines never mutate its
 // maps or clocks: a bounded recheck is installed before launch, and completion
 // wakes discovery to reload authoritative durable state. Sorted IDs provide a
 // simple deterministic order; no strict fairness across continuously arriving
 // lower IDs is promised.
 func (s *CoordinatorServer) scheduleQueuedJobs(ctx context.Context, records []JobRecord, q *recoverySchedule) {
-	if !s.hasEligibleWorker() {
-		for _, record := range records {
-			if _, retrying := q.entries[record.JobID]; retrying && q.eligible(record) {
-				q.recheck(record) // Avoid an overdue timer spinning after Worker loss.
-			}
-		}
-		return // No admission, generation, lease, timeout, metrics or retry budget.
-	}
 	sort.Slice(records, func(i, j int) bool { return records[i].JobID < records[j].JobID })
 	seen := make(map[int64]bool, len(records))
 	for _, record := range records {
@@ -96,6 +77,12 @@ func (s *CoordinatorServer) scheduleQueuedJobs(ctx context.Context, records []Jo
 			continue
 		}
 		seen[id] = true
+		if !s.hasEligibleWorker(record.TaskType) {
+			if _, retrying := q.entries[id]; retrying {
+				q.recheck(record) // Defer an overdue entry after Worker loss.
+			}
+			continue
+		}
 		sessionCtx, release, full := s.reserveQueuedSession(ctx, id)
 		if release == nil {
 			// Only an existing overdue entry needs deferring; a fresh backlog
@@ -113,6 +100,9 @@ func (s *CoordinatorServer) scheduleQueuedJobs(ctx context.Context, records []Jo
 		go func() {
 			defer release()
 			err := s.runClaimedQueuedJob(sessionCtx, id)
+			if err == errNoEligibleWorker {
+				return // Availability changed after the session precheck.
+			}
 			if err != nil {
 				log.Printf("queued session completed with durable scheduling error: job=%d pending_reconciliation=%v err=%v", id, s.hasQueuedReconciliation(id), err)
 			} else {

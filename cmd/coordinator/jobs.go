@@ -361,11 +361,14 @@ func (s *CoordinatorServer) retryRecoveringJobResult(ctx context.Context, record
 
 	observer := metrics.Resolve(s.metrics)
 	start := time.Now()
-	defer func() { observer.ObserveJobExecution(metrics.SourceRecovery, time.Since(start)) }()
-	result.executed = true
 	// Keep the shared engine's confirmed/attempted identities; the legacy
 	// response adapter discards precisely the provenance needed on write errors.
 	session := s.executeAttemptSession(ctx, spec, metrics.SourceRecovery, attemptSessionStart{mode: continueGeneration})
+	if session.err == errNoEligibleWorker {
+		return result, session.err
+	}
+	defer func() { observer.ObserveJobExecution(metrics.SourceRecovery, time.Since(start)) }()
+	result.executed = true
 	result.terminal = session.err == nil
 	if result.terminal {
 		result.generation = session.terminal.record.AttemptID

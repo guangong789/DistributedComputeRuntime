@@ -168,13 +168,13 @@ func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 	workerClient := &recordingCoordinatorClient{CoordinatorServiceClient: runtimepb.NewCoordinatorServiceClient(workerConn)}
 	ctx := mtlsContext(t)
 	// Unknown but authorized Worker recovers using the same client/connection.
-	if err := workerheartbeat.Send(ctx, workerClient, "worker-a", address); err != nil {
+	if err := workerheartbeat.Send(ctx, workerClient, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(workerClient.heartbeatAccepted, []bool{false}) || len(workerClient.registrations) != 1 {
 		t.Fatal("unknown heartbeat did not trigger exactly one re-registration")
 	}
-	if err := workerheartbeat.Send(ctx, workerClient, "worker-a", address); err != nil {
+	if err := workerheartbeat.Send(ctx, workerClient, &runtimepb.RegisterWorkerRequest{WorkerId: "worker-a", Address: address}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(workerClient.heartbeatAccepted, []bool{false, true}) || len(workerClient.registrations) != 1 {
@@ -205,7 +205,7 @@ func TestCoordinatorMTLSAuthorizedPaths(t *testing.T) {
 	if err != nil || !registered.GetAccepted() {
 		t.Fatal(err)
 	}
-	selected, ok := f.s.getNextWorker()
+	selected, ok := f.s.getNextWorker("hash")
 	_, _, order = coordinatorWorkerSnapshot(f.s, "worker-a")
 	if !ok || selected.Address != newAddress || !reflect.DeepEqual(order, []string{"worker-a"}) {
 		t.Fatal("re-registration changed endpoint/order/scheduling semantics")

@@ -18,10 +18,9 @@ type CoordinatorClient interface {
 func Send(
 	ctx context.Context,
 	client CoordinatorClient,
-	workerID string,
-	workerAddress string,
+	registration *runtimepb.RegisterWorkerRequest,
 ) error {
-	resp, err := client.Heartbeat(ctx, &runtimepb.HeartbeatRequest{WorkerId: workerID})
+	resp, err := client.Heartbeat(ctx, &runtimepb.HeartbeatRequest{WorkerId: registration.WorkerId})
 	if err != nil {
 		return err
 	}
@@ -29,15 +28,12 @@ func Send(
 		return nil
 	}
 
-	registration, err := client.RegisterWorker(ctx, &runtimepb.RegisterWorkerRequest{
-		WorkerId: workerID,
-		Address:  workerAddress,
-	})
+	response, err := client.RegisterWorker(ctx, registration)
 	if err != nil {
 		return err
 	}
-	if !registration.Accepted {
-		return fmt.Errorf("registration rejected: %s", registration.Error)
+	if !response.Accepted {
+		return fmt.Errorf("registration rejected: %s", response.Error)
 	}
 	return nil
 }

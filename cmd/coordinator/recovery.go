@@ -113,6 +113,19 @@ func (s *CoordinatorServer) runScheduledRecoveryPass(ctx context.Context, schedu
 			outcome = metrics.PassCancelled
 			return err
 		}
+		if !s.hasEligibleWorker(current.TaskType) {
+			if schedule != nil {
+				s.mu.Lock()
+				_, active := s.activeJobs[current.JobID]
+				s.mu.Unlock()
+				if active {
+					schedule.recheck(current)
+				} else {
+					schedule.backOff(current.JobID, current.AttemptID, recoverySpecHash(current))
+				}
+			}
+			continue
+		}
 		result, err := s.retryRecoveringJobResult(ctx, current)
 		if schedule != nil && ctx.Err() == nil {
 			if loadErr := schedule.completed(s.jobStore, current, result, err); loadErr != nil {
@@ -120,7 +133,7 @@ func (s *CoordinatorServer) runScheduledRecoveryPass(ctx context.Context, schedu
 				log.Printf("recovery reconciliation failed: job=%d err=%v", current.JobID, loadErr)
 			}
 		}
-		if err != nil {
+		if err != nil && err != errNoEligibleWorker {
 			if ctx.Err() != nil {
 				outcome = metrics.PassCancelled
 				// Preserve a repair failure joined with the cancellation error.
