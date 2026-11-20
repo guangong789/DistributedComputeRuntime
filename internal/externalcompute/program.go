@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
 )
 
 const (
@@ -19,11 +21,6 @@ const (
 )
 
 var ErrBusy = errors.New("external compute capacity is full")
-
-// Slot is the single external-compute permit shared by a Worker's programs.
-type Slot struct{ held chan struct{} }
-
-func NewSlot() *Slot { return &Slot{held: make(chan struct{}, 1)} }
 
 type Program struct {
 	name, path string
@@ -50,22 +47,28 @@ func NewProgram(name, path string, slot *Slot) (*Program, error) {
 	return &Program{name: name, path: path, slot: slot}, nil
 }
 
+// ObserveCUDAProbe records a completed local probe through the Worker slot's
+// observer. The Program's ordinary executions do not emit probe outcomes.
+func (p *Program) ObserveCUDAProbe(outcome metrics.ProbeOutcome) {
+	if p.slot.observer != nil {
+		p.slot.observer.CUDAProbeFinished(outcome)
+	}
+}
+
 // Run owns the child and its slot through I/O cleanup and result verification.
 // afterFailedExit, when supplied, receives bounded stderr for an unsuccessful
 // exit without context cancellation. Overflow and signal exits supply no text.
-func (p *Program) Run(ctx context.Context, input string, verify func(string) (string, error), afterFailedExit func(string)) (string, error) {
+func (p *Program) Run(ctx context.Context, owner metrics.ComputeOwner, input string, verify func(string) (string, error), afterFailedExit func(string)) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if len(input) >= streamLimit {
 		return "", fmt.Errorf("%s input exceeded its byte limit", p.name)
 	}
-	select {
-	case p.slot.held <- struct{}{}:
-	default:
+	if !p.slot.tryAcquire(owner) {
 		return "", ErrBusy
 	}
-	defer func() { <-p.slot.held }()
+	defer p.slot.release()
 
 	cmd := exec.CommandContext(ctx, p.path)
 	cmd.Dir = filepath.Dir(p.path)

@@ -22,7 +22,7 @@ type clientExecutionConfig struct {
 func clientExecutionFlags(fs *flag.FlagSet) *clientExecutionConfig {
 	c := &clientExecutionConfig{}
 	fs.DurationVar(&c.JobTimeout, "job-timeout", 5*time.Second, "positive Worker task timeout in whole milliseconds")
-	fs.DurationVar(&c.RPCTimeout, "rpc-timeout", 30*time.Second, "positive per-RPC timeout for admission and GetJob")
+	fs.DurationVar(&c.RPCTimeout, "rpc-timeout", 30*time.Second, "positive per-RPC timeout (diagnostics capped at 2s)")
 	fs.DurationVar(&c.ObserveTimeout, "observe-timeout", 30*time.Second, "positive total GetJob observation timeout; expiration does not cancel the Job")
 	fs.DurationVar(&c.PollInterval, "poll-interval", jobobservation.DefaultPollInterval, "positive interval between GetJob queries")
 	fs.Func("observe-job", "observe this signed JobID without submitting (for reconnect or lost admission acknowledgement)", func(value string) error {

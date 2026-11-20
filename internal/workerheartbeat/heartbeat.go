@@ -22,6 +22,7 @@ type CoordinatorClient interface {
 type Registration struct {
 	request *runtimepb.RegisterWorkerRequest
 	pending bool
+	cuda    cudaHealth
 }
 
 func NewRegistration(request *runtimepb.RegisterWorkerRequest) *Registration {
@@ -40,6 +41,9 @@ func (r *Registration) Register(ctx context.Context, client CoordinatorClient) e
 		if len(response.GetSessionToken()) != size {
 			return status.Error(codes.Unimplemented, "Coordinator did not provide a Worker registration session")
 		}
+		if !bytes.Equal(r.request.GetSessionToken(), response.GetSessionToken()) {
+			r.cuda.reset()
+		}
 		r.request.SessionToken = bytes.Clone(response.GetSessionToken())
 	}
 	r.pending = false
@@ -52,13 +56,21 @@ func (r *Registration) Send(ctx context.Context, client CoordinatorClient) error
 	if !r.pending {
 		resp, err := client.Heartbeat(ctx, &runtimepb.HeartbeatRequest{
 			WorkerId: r.request.WorkerId, SessionToken: r.request.GetSessionToken(),
+			CudaHealth: r.cuda.observation(),
 		})
 		if err != nil {
+			if status.Code(err) == codes.FailedPrecondition {
+				r.cuda.reset()
+			}
 			return err
 		}
 		if resp.GetAccepted() {
+			if r.request.GetCudaHealthManaged() && len(r.request.GetSessionToken()) != 0 {
+				r.cuda.setAnchor(resp.GetCudaHealthProbeAnchor())
+			}
 			return nil
 		}
+		r.cuda.reset()
 		r.pending = true
 	}
 	return r.Register(ctx, client)

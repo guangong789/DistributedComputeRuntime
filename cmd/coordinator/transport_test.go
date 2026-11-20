@@ -41,6 +41,11 @@ type mtlsCoordinator struct {
 
 func newMTLSCoordinator(t *testing.T, executionOptions ...coordinatorExecutionConfig) *mtlsCoordinator {
 	t.Helper()
+	return newMTLSCoordinatorWithSecurity(t, nil, executionOptions...)
+}
+
+func newMTLSCoordinatorWithSecurity(t *testing.T, configure func(*coordinatorSecurityConfig), executionOptions ...coordinatorExecutionConfig) *mtlsCoordinator {
+	t.Helper()
 	execution := coordinatorExecutionConfig{ListenAddress: "127.0.0.1:0", AttemptLease: defaultAttemptLease, ShutdownTimeout: defaultShutdownTimeout}
 	if len(executionOptions) != 0 {
 		execution = executionOptions[0]
@@ -48,6 +53,9 @@ func newMTLSCoordinator(t *testing.T, executionOptions ...coordinatorExecutionCo
 	ca := testpki.New(t)
 	files := ca.Issue(t, testpki.Coordinator, nil)
 	cfg := coordinatorSecurityConfig{CertFile: files.Cert, KeyFile: files.Key, CAFile: files.CA, Identity: testpki.Coordinator, Clients: []string{testpki.Client}, Workers: []string{testpki.Worker, workerBIdentity}}
+	if configure != nil {
+		configure(&cfg)
+	}
 	transport, err := cfg.load()
 	if err != nil {
 		t.Fatal(err)

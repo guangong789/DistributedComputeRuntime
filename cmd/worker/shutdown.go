@@ -83,9 +83,9 @@ func (l *workerLifecycle) cancelWork() {
 	}
 }
 
-// The existing rpcauth interceptor authenticates/authorizes before this wrapper.
-// A pre-admitted task may pass its last cancellation check and enter synchronous
-// Prove while draining. Its token remains owned until the entire handler exits.
+// The rpcauth interceptor authenticates and authorizes before this wrapper.
+// An admitted handler can pass its last cancellation check and start executing
+// the task while draining. It holds the admission token until the handler returns.
 type admittedWorkerService struct {
 	runtimepb.WorkerServiceServer
 	lifecycle *workerLifecycle

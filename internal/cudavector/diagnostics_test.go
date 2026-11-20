@@ -32,7 +32,7 @@ func TestClassifyFailure(t *testing.T) {
 		{"bad device banner", "device=0 name=truncated\nkernel_launch=cudaErrorInvalidConfiguration(9)\n", "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyFailure(tc.stderr); got != tc.want {
+			if got, _ := classifyFailure(tc.stderr); got != tc.want {
 				t.Fatalf("classification = %q, want %q", got, tc.want)
 			}
 		})

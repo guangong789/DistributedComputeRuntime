@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"go/version"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,11 +30,14 @@ const clientIdentity = "spiffe://distributedzk.local/client/client-1"
 const workerIdentity = "spiffe://distributedzk.local/worker/worker-1"
 
 func main() {
+	showCLI := flag.Bool("show-cli", false, "show the Diagnostics CLI using temporary authorized mTLS credentials")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 150*time.Second)
 	defer cancel()
-	if err := runDemo(ctx, os.Stdout); err != nil {
+	if err := runDemo(ctx, os.Stdout, *showCLI); err != nil {
 		fmt.Fprintln(os.Stderr, "Demo failed:", err)
 		os.Exit(1)
 	}
@@ -152,7 +157,7 @@ func connect(ctx context.Context, address, pki string, coordinator *child) (*grp
 	return nil, fmt.Errorf("authenticated Coordinator readiness failed: %w", errors.Join(ctx.Err(), coordinator.alive()))
 }
 
-func runDemo(ctx context.Context, out io.Writer) (result error) {
+func runDemo(ctx context.Context, out io.Writer, showCLI bool) (result error) {
 	fmt.Fprintln(out, "Distributed Compute Runtime | Local Distributed Demo\nReal Coordinator + Worker | gRPC/mTLS + SQLite\n\nInfrastructure")
 	repo, err := os.Getwd()
 	if err != nil {
@@ -166,37 +171,37 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 	if err != nil {
 		return err
 	}
+	var children []*child
+	defer func() {
+		for i := len(children) - 1; i >= 0; i-- {
+			result = errors.Join(result, children[i].stop())
+		}
+		if err := os.RemoveAll(workspace); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove temporary workspace: %w", err))
+		}
+		if result == nil {
+			fmt.Fprintln(out, "\nCleanup\n  [6/6] [OK] Owned children reaped; temporary workspace removed\n\nDemo completed successfully.")
+		}
+	}()
 	// MkdirTemp uses 0700. Resolve /tmp aliases before invoking the PKI script,
 	// which deliberately refuses symlink components in credential output paths.
-	workspace, err = filepath.EvalSymlinks(workspace)
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return err
 	}
-	var children []*child
-	defer func() {
-		var cleanupErr error
-		for i := len(children) - 1; i >= 0; i-- {
-			cleanupErr = errors.Join(cleanupErr, children[i].stop())
-		}
-		result = errors.Join(result, cleanupErr)
-		if result == nil {
-			result = os.RemoveAll(workspace)
-			if result == nil {
-				fmt.Fprintln(out, "\nCleanup\n  [6/6] [OK] Owned children reaped; temporary workspace removed\n\nDemo completed successfully.")
-			}
-		}
-		if result != nil {
-			result = fmt.Errorf("%w; isolated diagnostics retained at %s (contains temporary development PKI)", result, workspace)
-		}
-	}()
+	workspace = resolvedWorkspace
 	pki := filepath.Join(workspace, "pki")
 	if err := stage(ctx, 30*time.Second, func(ctx context.Context) error {
 		return runTool(ctx, repo, filepath.Join(workspace, "pki.log"), "bash", filepath.Join(repo, "scripts/dev-pki/bootstrap.sh"), "--out", pki)
 	}); err != nil {
 		return fmt.Errorf("PKI preparation: %w", err)
 	}
+	buildArgs := []string{"build", "-mod=readonly", "-p=1", "-o", workspace + string(os.PathSeparator), "./cmd/coordinator", "./cmd/worker"}
+	if showCLI {
+		buildArgs = append(buildArgs, "./cmd/client")
+	}
 	if err := stage(ctx, 60*time.Second, func(ctx context.Context) error {
-		return runTool(ctx, repo, filepath.Join(workspace, "build.log"), "go", "build", "-mod=readonly", "-p=1", "-o", workspace+string(os.PathSeparator), "./cmd/coordinator", "./cmd/worker")
+		return runTool(ctx, repo, filepath.Join(workspace, "build.log"), "go", buildArgs...)
 	}); err != nil {
 		return fmt.Errorf("offline build: %w", err)
 	}
@@ -206,6 +211,9 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 	}
 	db := filepath.Join(workspace, "jobs.db")
 	args := append([]string{"-listen", "127.0.0.1:0", "-metrics-listen", "127.0.0.1:0", "-shutdown-timeout", "3s", "-db", db, "-allow-client", clientIdentity, "-allow-worker", workerIdentity}, tlsArgs("coordinator")...)
+	if showCLI {
+		args = append(args, "-allow-diagnostics-client", clientIdentity)
+	}
 	c, err := startChild(repo, filepath.Join(workspace, "coordinator.log"), "coordinator mTLS listening on ", filepath.Join(workspace, "coordinator"), args...)
 	if err != nil {
 		return fmt.Errorf("Coordinator start: %w", err)
@@ -250,6 +258,24 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 		return fmt.Errorf("Worker registration: %w", err)
 	}
 	fmt.Fprintln(out, "  [3/6] [OK] Worker registered using mTLS")
+	runCLI := func(command ...string) error {
+		return stage(ctx, 5*time.Second, func(ctx context.Context) error {
+			args := append([]string{"-coordinator", address}, tlsArgs("client-1")...)
+			cmd := exec.CommandContext(ctx, filepath.Join(workspace, "client"), append(args, command...)...)
+			cmd.Env = offlineEnv()
+			// Pass the terminal file through so Client decides whether to use color.
+			cmd.Stdout = out
+			cmd.Stderr = os.Stderr
+			cmd.WaitDelay = time.Second
+			return cmd.Run()
+		})
+	}
+	if showCLI {
+		fmt.Fprintln(out)
+		if err := runCLI("workers"); err != nil {
+			return fmt.Errorf("diagnostics workers: %w", err)
+		}
+	}
 	req := &runtimepb.SubmitJobRequest{JobId: 1, TaskType: "hash", Payload: "Distributed Compute Runtime local demo", TimeoutMs: 5000}
 	fmt.Fprintf(out, "\nTask Execution\n  Submitting task: %s\n", req.TaskType)
 	client := runtimepb.NewCoordinatorServiceClient(conn)
@@ -281,7 +307,14 @@ func runDemo(ctx context.Context, out io.Writer) (result error) {
 	if err := validateResponse(req, resp); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "  [4/6] [OK] Background hash task completed (GetJob)\n  JobID: %d | AttemptID: %d | Final State: %s | HasWorkerResult: %t\n\nVerification\n  [OK] SHA-256 independently verified by demo\n  SHA-256: %s\n", resp.JobId, resp.AttemptId, jobobservation.StateName(resp.State), resp.HasWorkerResult, resp.Output)
+	fmt.Fprintf(out, "  [4/6] [OK] Background hash task completed (GetJob)\n  JobID: %d | AttemptID: %d | Final State: %s | HasWorkerResult: %t\n", resp.JobId, resp.AttemptId, jobobservation.StateName(resp.State), resp.HasWorkerResult)
+	if showCLI {
+		fmt.Fprintln(out)
+		if err := runCLI("diagnose", "job", strconv.FormatInt(resp.JobId, 10)); err != nil {
+			return fmt.Errorf("diagnostics diagnose job: %w", err)
+		}
+	}
+	fmt.Fprintf(out, "\nVerification\n  [OK] SHA-256 independently verified by demo\n  SHA-256: %s\n", resp.Output)
 	// Stop before opening a read-only SQLite connection; no concurrent writers.
 	var shutdownErr error
 	for i := len(children) - 1; i >= 0; i-- {

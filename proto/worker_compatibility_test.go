@@ -38,7 +38,7 @@ func TestExistingProtocolWireCompatibility(t *testing.T) {
 		methods []protoreflect.Name
 	}{
 		{"WorkerService", []protoreflect.Name{"ExecuteJob"}},
-		{"CoordinatorService", []protoreflect.Name{"RegisterWorker", "SubmitJob", "Heartbeat", "GetJob"}},
+		{"CoordinatorService", []protoreflect.Name{"RegisterWorker", "SubmitJob", "Heartbeat", "GetJob", "ListWorkers", "DiagnoseJob"}},
 	} {
 		descriptor := runtimepb.File_proto_worker_proto.Services().ByName(service.name)
 		if descriptor == nil || descriptor.Methods().Len() != len(service.methods) {

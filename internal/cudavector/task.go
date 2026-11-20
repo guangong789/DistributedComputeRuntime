@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/guangong789/DistributedComputeRuntime/internal/externalcompute"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
 )
 
 const (
@@ -50,17 +51,26 @@ func NewTask(program *externalcompute.Program, payload string) (Task, error) {
 }
 
 func (t Task) Execute(ctx context.Context) (string, error) {
+	return t.execute(ctx, metrics.ComputeJob)
+}
+
+func (t Task) ExecuteProbe(ctx context.Context) (string, error) {
+	return t.execute(ctx, metrics.ComputeProbe)
+}
+
+func (t Task) execute(ctx context.Context, owner metrics.ComputeOwner) (string, error) {
 	var stage string
-	output, err := t.program.Run(ctx, t.input, func(stdout string) (string, error) {
+	var backendUnavailable bool
+	output, err := t.program.Run(ctx, owner, t.input, func(stdout string) (string, error) {
 		if stdout != t.expected+"\n" {
 			return "", errors.New("cuda_vector_transform child returned an invalid or incorrect result")
 		}
 		return t.expected, nil
 	}, func(stderr string) {
-		stage = classifyFailure(stderr)
+		stage, backendUnavailable = classifyFailure(stderr)
 	})
 	if stage != "" {
-		err = &failedExit{error: err, stage: stage}
+		err = &failedExit{error: err, stage: stage, backendUnavailable: backendUnavailable}
 	}
 	return output, err
 }

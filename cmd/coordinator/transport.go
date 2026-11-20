@@ -17,7 +17,7 @@ import (
 
 type coordinatorSecurityConfig struct {
 	CertFile, KeyFile, CAFile, Identity string
-	Clients, Workers                    []string
+	Clients, Workers, DiagnosticClients []string
 }
 
 func coordinatorSecurityFlags(fs *flag.FlagSet) *coordinatorSecurityConfig {
@@ -28,6 +28,10 @@ func coordinatorSecurityFlags(fs *flag.FlagSet) *coordinatorSecurityConfig {
 	fs.StringVar(&c.Identity, "identity", rpcauth.CoordinatorIdentity, "local Coordinator URI SAN identity")
 	fs.Func("allow-client", "allowed Client URI identity (repeatable; empty list denies all Clients)", func(value string) error {
 		c.Clients = append(c.Clients, value)
+		return nil
+	})
+	fs.Func("allow-diagnostics-client", "allowed diagnostic Client URI identity (repeatable; must also be in -allow-client)", func(value string) error {
+		c.DiagnosticClients = append(c.DiagnosticClients, value)
 		return nil
 	})
 	fs.Func("allow-worker", "allowed Worker URI identity (repeatable; empty list denies all Workers)", func(value string) error {
@@ -52,7 +56,11 @@ func (c coordinatorSecurityConfig) load() (*coordinatorTransport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("-allow-worker: %w", err)
 	}
-	policy, err := rpcauth.NewPolicy(local, clients, workers)
+	diagnostics, err := allowedPrincipals(c.DiagnosticClients, rpcauth.Client)
+	if err != nil {
+		return nil, fmt.Errorf("-allow-diagnostics-client: %w", err)
+	}
+	policy, err := rpcauth.NewPolicy(local, clients, workers, diagnostics...)
 	if err != nil {
 		return nil, err
 	}

@@ -33,6 +33,10 @@ func cudaVectorFixture() int {
 		return 90
 	}
 	input, err := io.ReadAll(io.LimitReader(os.Stdin, 385))
+	probeInput, _ := cudaProbeFixtureVector()
+	if err == nil && string(input) == probeInput+"\n" {
+		return cudaProbeFixture()
+	}
 	first, remainder, found := strings.Cut(string(input), ",")
 	if err != nil || !found || remainder != "0"+strings.Repeat(",0", 62)+"\n" {
 		return 91

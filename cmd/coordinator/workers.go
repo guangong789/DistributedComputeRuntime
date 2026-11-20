@@ -36,6 +36,46 @@ type WorkerInfo struct {
 	LastSeen      time.Time
 	Status        WorkerStatus
 	externalTasks externalTaskSet
+	cudaHealth    cudaHealthEvidence
+}
+
+type cudaHealthEvidence struct {
+	managed   bool
+	origin    time.Time
+	sequence  uint64
+	state     runtimepb.CudaHealthState
+	expiresAt time.Time
+}
+
+// Anchors encode elapsed nanoseconds plus one to reserve zero. Since Sub
+// returns a signed duration, the offset fits in uint64 even at saturation.
+func (h cudaHealthEvidence) anchor(now time.Time) uint64 {
+	elapsed := now.Sub(h.origin)
+	if elapsed < 0 {
+		return 0
+	}
+	return uint64(elapsed) + 1
+}
+
+func (h *cudaHealthEvidence) observe(observation *runtimepb.CudaHealthObservation, now time.Time, currentAnchor uint64, ttl time.Duration) {
+	sequence := observation.GetObservationSeq()
+	if sequence <= h.sequence {
+		return
+	}
+	state := observation.GetState()
+	anchor := observation.GetProbeAnchor()
+	if (state != runtimepb.CudaHealthState_CUDA_HEALTH_STATE_READY &&
+		state != runtimepb.CudaHealthState_CUDA_HEALTH_STATE_UNAVAILABLE) ||
+		anchor == 0 || anchor > currentAnchor {
+		return
+	}
+	// The range check bounds the offset to a signed duration. Add the TTL
+	// separately to avoid overflowing when summing two durations.
+	expiresAt := h.origin.Add(time.Duration(anchor - 1)).Add(ttl)
+	if !now.Before(expiresAt) {
+		return
+	}
+	h.sequence, h.state, h.expiresAt = sequence, state, expiresAt
 }
 
 // A value set keeps endpoint and capability snapshots self-contained.
@@ -57,11 +97,34 @@ func externalTaskCapability(taskType string) externalTaskSet {
 	}
 }
 
-func (w WorkerInfo) eligibleFor(taskType string) bool {
+func (w WorkerInfo) configuredFor(taskType string) bool {
 	required := externalTaskCapability(taskType)
 	// Built-ins require no advertisement. Other task names still use the
 	// Worker's existing execution-time validation; unknown ads grant nothing.
-	return w.Status == WorkerAlive && (required == 0 || w.externalTasks&required != 0)
+	return required == 0 || w.externalTasks&required != 0
+}
+
+func (h cudaHealthEvidence) freshAt(now time.Time) bool {
+	return now.Before(h.expiresAt)
+}
+
+func (w WorkerInfo) eligibleFor(taskType string, now time.Time) bool {
+	if w.Status != WorkerAlive || !w.configuredFor(taskType) {
+		return false
+	}
+	if taskType != cudavector.TaskType || !w.cudaHealth.managed {
+		return true
+	}
+	return w.cudaHealth.state == runtimepb.CudaHealthState_CUDA_HEALTH_STATE_READY &&
+		w.cudaHealth.freshAt(now)
+}
+
+// workerRegistryNow is sampled under mu for both heartbeat and placement.
+func (s *CoordinatorServer) workerRegistryNow() time.Time {
+	if s.workerNow != nil {
+		return s.workerNow()
+	}
+	return time.Now()
 }
 
 func (s *CoordinatorServer) RegisterWorker(
@@ -90,14 +153,27 @@ func (s *CoordinatorServer) RegisterWorker(
 		externalTasks |= externalTaskCapability(taskType)
 	}
 
+	managed := req.GetCudaHealthManaged()
+	if managed {
+		if len(key) == 0 || externalTasks&cudaVectorCapability != 0 {
+			return nil, status.Error(codes.InvalidArgument, "managed CUDA health requires a session and no ordinary CUDA advertisement")
+		}
+		externalTasks |= cudaVectorCapability
+	}
+
 	s.mu.Lock()
+	if managed && s.healthTTL <= 0 {
+		s.mu.Unlock()
+		return nil, status.Error(codes.Unimplemented, "managed CUDA health is not configured")
+	}
+	now := s.workerRegistryNow()
 
 	if s.workers == nil {
 		s.workers = make(map[string]WorkerInfo)
 	}
 
 	previous, exists := s.workers[req.WorkerId]
-	session, retry, err := s.claimWorkerRegistrationLocked(previous, exists, req, externalTasks)
+	session, retry, err := s.claimWorkerRegistrationLocked(previous, exists, req, externalTasks, now)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -107,13 +183,17 @@ func (s *CoordinatorServer) RegisterWorker(
 		return &runtimepb.RegisterWorkerResponse{Accepted: true, SessionToken: session}, nil
 	}
 
-	s.workers[req.WorkerId] = WorkerInfo{
+	worker := WorkerInfo{
 		ID:            req.WorkerId,
 		Address:       req.Address,
-		LastSeen:      time.Now(),
+		LastSeen:      now,
 		Status:        WorkerAlive,
 		externalTasks: externalTasks,
 	}
+	if managed {
+		worker.cudaHealth = cudaHealthEvidence{managed: true, origin: now}
+	}
+	s.workers[req.WorkerId] = worker
 
 	if !exists {
 		s.workerOrder = append(s.workerOrder, req.WorkerId)
@@ -140,7 +220,7 @@ func (s *CoordinatorServer) RegisterWorker(
 }
 
 // The caller publishes the endpoint and capabilities under the same lock.
-func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, exists bool, req *runtimepb.RegisterWorkerRequest, tasks externalTaskSet) (token []byte, retry bool, err error) {
+func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, exists bool, req *runtimepb.RegisterWorkerRequest, tasks externalTaskSet, now time.Time) (token []byte, retry bool, err error) {
 	key, priorToken := req.GetRegistrationKey(), req.GetSessionToken()
 	current, owned := s.workerSessions[req.WorkerId]
 	if len(key) == 0 {
@@ -152,7 +232,8 @@ func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, e
 	if owned && subtle.ConstantTimeCompare(current.key[:], key) == 1 {
 		// A reply can be lost after publication, including during reconnect.
 		// Repeating a claim only returns its token, without renewing liveness.
-		if previous.Address != req.Address || previous.externalTasks != tasks {
+		if previous.Address != req.Address || previous.externalTasks != tasks ||
+			previous.cudaHealth.managed != req.GetCudaHealthManaged() {
 			return nil, false, status.Error(codes.InvalidArgument, "Worker registration changed within a session")
 		}
 		return current.token[:], true, nil
@@ -160,7 +241,7 @@ func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, e
 	if exists && len(priorToken) != 0 {
 		return nil, false, status.Error(codes.FailedPrecondition, "Worker registration session revoked")
 	}
-	if exists && time.Since(previous.LastSeen) <= workerLivenessTimeout {
+	if exists && now.Sub(previous.LastSeen) <= workerLivenessTimeout {
 		return nil, false, status.Error(codes.AlreadyExists, "Worker registration is live")
 	}
 	var next workerRegistrationSession
@@ -179,8 +260,9 @@ func (s *CoordinatorServer) claimWorkerRegistrationLocked(previous WorkerInfo, e
 func (s *CoordinatorServer) hasEligibleWorker(taskType string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.workerRegistryNow()
 	for _, id := range s.workerOrder {
-		if worker, ok := s.workers[id]; ok && worker.eligibleFor(taskType) {
+		if worker, ok := s.workers[id]; ok && worker.eligibleFor(taskType, now) {
 			return true
 		}
 	}
@@ -195,6 +277,7 @@ func (s *CoordinatorServer) getNextWorker(taskType string) (WorkerInfo, bool) {
 		return WorkerInfo{}, false
 	}
 
+	now := s.workerRegistryNow()
 	for i := 0; i < len(s.workerOrder); i++ {
 		workerID := s.workerOrder[s.nextWorker]
 
@@ -205,7 +288,7 @@ func (s *CoordinatorServer) getNextWorker(taskType string) (WorkerInfo, bool) {
 			continue
 		}
 
-		if !worker.eligibleFor(taskType) {
+		if !worker.eligibleFor(taskType, now) {
 			continue
 		}
 
@@ -235,19 +318,27 @@ func (s *CoordinatorServer) Heartbeat(
 		s.mu.Unlock()
 		return nil, status.Error(codes.FailedPrecondition, "Worker registration session revoked")
 	}
+	now := s.workerRegistryNow()
 	previousState := worker.Status
-	worker.LastSeen = time.Now()
+	managed := worker.cudaHealth.managed
+	wasCUDAEligible := managed && worker.eligibleFor(cudavector.TaskType, now)
+	var anchor uint64
+	if managed {
+		anchor = worker.cudaHealth.anchor(now)
+		worker.cudaHealth.observe(req.GetCudaHealth(), now, anchor, s.healthTTL)
+	}
+	worker.LastSeen = now
 	worker.Status = WorkerAlive
 	s.workers[req.WorkerId] = worker
 	s.mu.Unlock()
 	if previousState == WorkerDead {
 		metrics.Resolve(s.metrics).WorkerStateChanged(metrics.WorkerDead, metrics.WorkerAlive, metrics.WorkerHeartbeat)
+	}
+	if previousState == WorkerDead || (managed && !wasCUDAEligible && worker.eligibleFor(cudavector.TaskType, now)) {
 		s.notifyRecoveryReady()
 	}
 
-	return &runtimepb.HeartbeatResponse{
-		Accepted: true,
-	}, nil
+	return &runtimepb.HeartbeatResponse{Accepted: true, CudaHealthProbeAnchor: anchor}, nil
 }
 
 // notifyRecoveryReady runs after registry publication and outside s.mu.
@@ -263,9 +354,8 @@ func (s *CoordinatorServer) notifyRecoveryReady() {
 func (s *CoordinatorServer) checkWorkerLiveness(
 	timeout time.Duration,
 ) {
-	now := time.Now()
-
 	s.mu.Lock()
+	now := s.workerRegistryNow()
 	transitions := 0
 
 	for id, worker := range s.workers {

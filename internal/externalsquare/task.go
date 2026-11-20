@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/guangong789/DistributedComputeRuntime/internal/externalcompute"
+	"github.com/guangong789/DistributedComputeRuntime/internal/metrics"
 )
 
 const (
@@ -53,7 +54,7 @@ func (p *Program) Task(payload string) (Task, error) {
 }
 
 func (t Task) Execute(ctx context.Context) (string, error) {
-	output, err := t.program.child.Run(ctx, t.input, func(stdout string) (string, error) {
+	output, err := t.program.child.Run(ctx, metrics.ComputeJob, t.input, func(stdout string) (string, error) {
 		expected := strconv.FormatUint(t.n*t.n, 10)
 		if stdout != expected+"\n" {
 			return "", errors.New("external_square child returned an invalid or incorrect result")

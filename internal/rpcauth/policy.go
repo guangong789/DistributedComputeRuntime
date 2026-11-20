@@ -15,9 +15,11 @@ import (
 type Policy struct {
 	coordinator Principal
 	allowed     map[Principal]struct{}
+	diagnostics map[Principal]struct{}
 }
 
-func NewPolicy(coordinator Principal, clients, workers []Principal) (*Policy, error) {
+// Diagnostic Clients must also be on the ordinary Client allowlist.
+func NewPolicy(coordinator Principal, clients, workers []Principal, diagnosticClients ...Principal) (*Policy, error) {
 	if !coordinator.valid() || coordinator.Role() != Coordinator {
 		return nil, errors.New("coordinator principal required")
 	}
@@ -28,6 +30,15 @@ func NewPolicy(coordinator Principal, clients, workers []Principal) (*Policy, er
 				return nil, errors.New("allowlist principal has incorrect role")
 			}
 			p.allowed[principal] = struct{}{}
+		}
+	}
+	if len(diagnosticClients) != 0 {
+		p.diagnostics = make(map[Principal]struct{}, len(diagnosticClients))
+		for _, principal := range diagnosticClients {
+			if principal.Role() != Client || !p.recognizes(principal) {
+				return nil, errors.New("diagnostics allowlist must be a subset of allowed Clients")
+			}
+			p.diagnostics[principal] = struct{}{}
 		}
 	}
 	return p, nil
@@ -46,7 +57,14 @@ func (p *Policy) recognizes(principal Principal) bool {
 func (p *Policy) AuthorizeRPC(principal Principal, method string, request any) error {
 	allowed := false
 	if p.recognizes(principal) {
+		_, diagnosticClient := p.diagnostics[principal]
 		switch method {
+		case runtimepb.CoordinatorService_ListWorkers_FullMethodName:
+			req, ok := request.(*runtimepb.ListWorkersRequest)
+			allowed = ok && req != nil && diagnosticClient
+		case runtimepb.CoordinatorService_DiagnoseJob_FullMethodName:
+			req, ok := request.(*runtimepb.DiagnoseJobRequest)
+			allowed = ok && req != nil && diagnosticClient
 		case runtimepb.CoordinatorService_GetJob_FullMethodName:
 			req, ok := request.(*runtimepb.GetJobRequest)
 			allowed = ok && req != nil && principal.Role() == Client

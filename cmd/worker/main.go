@@ -277,6 +277,7 @@ type workerConfig struct {
 	MetricsAddress                                          string
 	ExternalSquarePath                                      string
 	CUDAVectorPath                                          string
+	CUDAHealthManaged                                       bool // internal opt-in for controlled observations
 	ShutdownTimeout                                         time.Duration
 	Security                                                rpcauth.CoordinatorClientConfig
 }
@@ -334,7 +335,14 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err != nil {
 		return fmt.Errorf("worker mTLS configuration: %w", err)
 	}
-	computeSlot := externalcompute.NewSlot()
+	registry := prom.NewRegistry()
+	if _, err := prommetrics.New(registry); err != nil {
+		return fmt.Errorf("initialize metrics: %w", err)
+	}
+	computeSlot, err := prommetrics.NewWorkerSlot(registry)
+	if err != nil {
+		return err
+	}
 	var externalSquare *externalsquare.Program
 	if cfg.ExternalSquarePath != "" {
 		externalSquare, err = externalsquare.NewProgram(cfg.ExternalSquarePath, computeSlot)
@@ -352,9 +360,8 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	registry := prom.NewRegistry()
-	if _, err := prommetrics.New(registry); err != nil {
-		return fmt.Errorf("initialize metrics: %w", err)
+	if cfg.CUDAHealthManaged && cudaVector == nil {
+		return errors.New("managed CUDA health requires a configured CUDA executable")
 	}
 	service := &WorkerService{externalSquare: externalSquare, cudaVector: cudaVector}
 	metricsServer, err := prommetrics.StartHTTP(cfg.MetricsAddress, registry)
@@ -385,6 +392,7 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	// Both registration paths use this immutable snapshot of validated configuration.
 	request := &runtimepb.RegisterWorkerRequest{
 		WorkerId: cfg.ID, Address: cfg.AdvertiseAddress, RegistrationKey: make([]byte, 32),
+		CudaHealthManaged: cfg.CUDAHealthManaged,
 	}
 	if _, err := rand.Read(request.RegistrationKey); err != nil {
 		return errors.New("cannot create Worker registration key")
@@ -392,7 +400,7 @@ func initializeWorker(p *workerProcess, cfg workerConfig, publish func()) error 
 	if service.externalSquare != nil {
 		request.ExternalTaskTypes = append(request.ExternalTaskTypes, externalsquare.TaskType)
 	}
-	if service.cudaVector != nil {
+	if service.cudaVector != nil && !request.CudaHealthManaged {
 		request.ExternalTaskTypes = append(request.ExternalTaskTypes, cudavector.TaskType)
 	}
 	registration := workerheartbeat.NewRegistration(request)

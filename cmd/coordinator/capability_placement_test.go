@@ -147,7 +147,7 @@ func TestCapabilityRoundRobinAndSnapshots(t *testing.T) {
 	}
 	old, _ := s.getNextWorker(cudavector.TaskType)
 	register("gpu", "localhost:50053", []string{externalsquare.TaskType})
-	if old.Address != "localhost:50052" || !old.eligibleFor(cudavector.TaskType) ||
+	if old.Address != "localhost:50052" || !old.eligibleFor(cudavector.TaskType, time.Now()) ||
 		s.hasEligibleWorker(cudavector.TaskType) || len(s.workerOrder) != 2 {
 		t.Fatal("re-registration mutated the old snapshot or kept stale CUDA support")
 	}
@@ -173,7 +173,7 @@ func TestCapabilityRoundRobinAndSnapshots(t *testing.T) {
 				if task == externalsquare.TaskType {
 					wantAddr = "localhost:50053"
 				}
-				if got.ID != "gpu" || got.Address != wantAddr || !got.eligibleFor(task) {
+				if got.ID != "gpu" || got.Address != wantAddr || !got.eligibleFor(task, time.Now()) {
 					t.Errorf("torn snapshot for %s: %+v", task, got)
 				}
 			}

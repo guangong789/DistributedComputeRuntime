@@ -13,14 +13,15 @@ import (
 
 func TestWorkerCapabilityAdvertisement(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		square, cuda bool
-		want         []string
+		name                  string
+		square, cuda, managed bool
+		want                  []string
 	}{
 		{name: "builtins only"},
 		{name: "external CPU only", square: true, want: []string{externalsquare.TaskType}},
 		{name: "CUDA only", cuda: true, want: []string{cudavector.TaskType}},
 		{name: "both external tasks", square: true, cuda: true, want: []string{externalsquare.TaskType, cudavector.TaskType}},
+		{name: "managed CUDA with external CPU", square: true, cuda: true, managed: true, want: []string{externalsquare.TaskType}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -41,6 +42,7 @@ func TestWorkerCapabilityAdvertisement(t *testing.T) {
 			}
 			address, ca, _, _, _ := startShutdownCoordinator(t, service)
 			cfg := workerTestConfig(t, ca, address)
+			cfg.CUDAHealthManaged = tc.managed
 			if tc.square {
 				cfg.ExternalSquarePath = computeFixturePath(t, t.TempDir(), externalSquareFixtureName)
 			}
@@ -54,8 +56,9 @@ func TestWorkerCapabilityAdvertisement(t *testing.T) {
 			for _, phase := range []string{"initial registration", "heartbeat re-registration"} {
 				got := awaitWorker(t, registrations)
 				if got.GetWorkerId() != cfg.ID || got.GetAddress() != cfg.AdvertiseAddress ||
-					!slices.Equal(got.GetExternalTaskTypes(), tc.want) || len(got.GetRegistrationKey()) != 32 {
-					t.Errorf("%s sent unexpected identity or capabilities", phase)
+					!slices.Equal(got.GetExternalTaskTypes(), tc.want) || len(got.GetRegistrationKey()) != 32 ||
+					got.GetCudaHealthManaged() != tc.managed {
+					t.Errorf("%s sent unexpected identity, capabilities or health mode", phase)
 				}
 			}
 			cancel()
@@ -64,6 +67,19 @@ func TestWorkerCapabilityAdvertisement(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("managed without CUDA executable", func(t *testing.T) {
+		service := shutdownCoordinator{register: func(context.Context, *runtimepb.RegisterWorkerRequest) (*runtimepb.RegisterWorkerResponse, error) {
+			t.Error("managed Worker without a CUDA executable reached registration")
+			return &runtimepb.RegisterWorkerResponse{Accepted: false}, nil
+		}}
+		address, ca, _, _, _ := startShutdownCoordinator(t, service)
+		cfg := workerTestConfig(t, ca, address)
+		cfg.CUDAHealthManaged = true
+		if err := runWorker(t.Context(), cfg); err == nil {
+			t.Fatal("Worker enabled health management without a CUDA executable")
+		}
+	})
 
 	t.Run("bad CUDA executable", func(t *testing.T) {
 		service := shutdownCoordinator{register: func(context.Context, *runtimepb.RegisterWorkerRequest) (*runtimepb.RegisterWorkerResponse, error) {

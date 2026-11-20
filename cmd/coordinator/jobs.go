@@ -176,6 +176,13 @@ func (s *MemoryJobStores) Load(
 	return record, ok, nil
 }
 
+func (s *MemoryJobStores) loadContext(ctx context.Context, jobID int64) (JobRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return JobRecord{}, false, err
+	}
+	return s.Load(jobID)
+}
+
 func jobStateFromStatus(status string) (JobState, error) {
 	switch strings.ToLower(status) {
 	case "succeeded":

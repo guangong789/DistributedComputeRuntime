@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -275,10 +276,14 @@ func (s *SQLiteJobStore) Save(record JobRecord) error {
 func (s *SQLiteJobStore) Load(
 	jobID int64,
 ) (JobRecord, bool, error) {
+	return s.loadContext(context.Background(), jobID)
+}
+
+func (s *SQLiteJobStore) loadContext(ctx context.Context, jobID int64) (JobRecord, bool, error) {
 	var record JobRecord
 	var state int
 
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT
 			job_id,
 			state,

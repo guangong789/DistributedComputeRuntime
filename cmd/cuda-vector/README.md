@@ -40,5 +40,46 @@ through reaping and I/O cleanup. A signal alone does not establish that a
 running kernel has stopped or GPU resources have been released. The
 [direct-child parent-death protection](../external-square/README.md) also
 applies to this executable. Deploy it as one unprivileged process without
-descendants or credential changes. GPU-aware placement remains outside this
-contract.
+descendants or credential changes.
+
+## CUDA health and probing
+
+Stock binaries advertise configured CUDA capability and use recorded Worker
+liveness for unmanaged placement. Startup has no managed CUDA health flag
+or periodic probe goroutine. Controlled fixtures explicitly invoke the
+one-shot probe with the configured CUDA executable under a three-second
+execution context and verify its output.
+The probe shares the external-compute slot with Jobs. A held probe can
+cause a Job to receive `ResourceExhausted`. A held Job can make a probe
+skip with No Observation.
+
+A local Ready result supplies a candidate observation. Managed CUDA placement
+requires fresh Ready evidence accepted by the Coordinator for the current
+session. Evidence expires at the original Coordinator-issued anchor time
+plus the TTL. With no accepted evidence or after expiry, effective health
+is Unknown. Unavailable requires a recognized backend failure.
+Busy, cancellation, timeout, output mismatch, and inconclusive errors
+produce No Observation. A later health transition affects future placement
+and leaves already authorized Attempts running under their existing leases.
+
+## Worker compute metrics
+
+The Worker serves local metrics at `http://127.0.0.1:9091/metrics`
+by default. Keep the endpoint on loopback or a trusted monitoring network.
+Stock Workers run no probes, so probe outcome series stay at their initial
+values during normal operation.
+
+| Metric family | Meaning |
+|---|---|
+| `dzkr_compute_slot_occupied` | Current occupancy by owner (`job` or `probe`) |
+| `dzkr_compute_slot_hold_age_seconds` | Age of the current hold by owner, or zero for an idle category |
+| `dzkr_compute_slot_denials_total` | Denials by requester and actual holder at admission |
+| `dzkr_compute_slot_hold_duration_seconds` | Histogram of completed holds by owner, including child execution, reaping, cleanup, and verification |
+| `dzkr_cuda_probe_outcomes_total` | Local probe completions by outcome (`ready`, `unavailable`, `no_observation`) |
+| `dzkr_cuda_probe_last_outcome` | One for the latest local outcome, or zero for every outcome before the first completion |
+
+Probe Busy skips are the sum of denials with `requester="probe"`. Their
+No Observation outcome describes the same calls. Coordinator acceptance
+and freshness are evaluated separately from local probe outcomes. Metrics
+are process-local, and counters and histograms reset on Worker restart.
+A scrape and a separate local snapshot can observe different instants.

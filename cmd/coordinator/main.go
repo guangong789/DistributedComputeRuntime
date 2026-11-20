@@ -31,6 +31,11 @@ type CoordinatorServer struct {
 	workerOrder    []string
 	nextWorker     int
 
+	// Configure before serving. A nil clock uses time.Now. Managed CUDA
+	// registration requires a positive healthTTL.
+	workerNow func() time.Time
+	healthTTL time.Duration
+
 	jobAttempts map[int64]int64
 	leases      map[int64]JobLease
 

@@ -10,7 +10,8 @@ import (
 
 type failedExit struct {
 	error
-	stage string
+	stage              string
+	backendUnavailable bool
 }
 
 func (e *failedExit) Unwrap() error { return e.error }
@@ -25,11 +26,18 @@ func FailureStage(err error) string {
 	return ""
 }
 
-func classifyFailure(stderr string) string {
+// BackendUnavailable reports a recognized failure of the fixed CUDA backend.
+// The log-only failure stage alone does not establish backend unavailability.
+func BackendUnavailable(err error) bool {
+	var exit *failedExit
+	return errors.As(err, &exit) && exit.backendUnavailable
+}
+
+func classifyFailure(stderr string) (stage string, backendUnavailable bool) {
 	const unknown = "unknown"
 	records, complete := strings.CutSuffix(stderr, "\n")
 	if !complete {
-		return unknown
+		return unknown, false
 	}
 	// The executable checks APIs in this order. After the first failure it
 	// can only report cleanup checks, which do not replace the primary stage.
@@ -42,23 +50,29 @@ func classifyFailure(stderr string) string {
 		{"device_to_host", "memory_or_transfer"}, {"cudaFree", "cleanup"}, {"cudaDeviceReset", "cleanup"},
 	}
 	previous, firstFailure := -1, -1
+	var firstDetail string
+	completePrefix, freed := true, false
 	for record := range strings.SplitSeq(records, "\n") {
 		operation, detail, ok := strings.Cut(record, "=")
 		i := slices.IndexFunc(steps[:], func(step check) bool {
 			return step.operation == operation
 		})
 		if !ok || i <= previous {
-			return unknown // Unrecognized, repeated or out-of-order record.
+			return unknown, false // Unrecognized, repeated or out-of-order record.
+		}
+		if firstFailure < 0 && i != previous+1 {
+			completePrefix = false
 		}
 		previous = i
+		freed = freed || operation == "cudaFree"
 		stage := steps[i].stage
 		if firstFailure >= 0 && (stage != "cleanup" || steps[firstFailure].stage == "device" ||
 			steps[firstFailure].operation == "cudaMalloc" && operation == "cudaFree") {
-			return unknown
+			return unknown, false
 		}
 		if stage == "" {
 			if !validDeviceBanner(detail) {
-				return unknown
+				return unknown, false
 			}
 			continue
 		}
@@ -66,16 +80,29 @@ func classifyFailure(stderr string) string {
 			continue
 		}
 		if !failedCheck(detail) {
-			return unknown
+			return unknown, false
 		}
 		if firstFailure < 0 {
-			firstFailure = i
+			firstFailure, firstDetail = i, detail
 		}
 	}
 	if firstFailure < 0 {
-		return unknown
+		return unknown, false
 	}
-	return steps[firstFailure].stage
+	// A diagnostic stage can be useful even for a partial trace. Health
+	// evidence requires the successful API prefix and, for a kernel fault,
+	// the cleanup records emitted by the trusted CUDA executable.
+	primary := steps[firstFailure]
+	if completePrefix {
+		switch primary.operation {
+		case "cudaGetDeviceCount":
+			backendUnavailable = firstDetail == "cudaErrorNoDevice(100)"
+		case "kernel_launch", "cudaDeviceSynchronize":
+			backendUnavailable = freed && steps[previous].operation == "cudaDeviceReset" &&
+				(firstDetail == "cudaErrorLaunchFailure(719)" || firstDetail == "cudaErrorIllegalAddress(700)")
+		}
+	}
+	return primary.stage, backendUnavailable
 }
 
 func failedCheck(detail string) bool {

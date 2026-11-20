@@ -9,6 +9,8 @@ package runtimepb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -20,6 +22,55 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+type CudaHealthState int32
+
+const (
+	CudaHealthState_CUDA_HEALTH_STATE_UNSPECIFIED CudaHealthState = 0
+	CudaHealthState_CUDA_HEALTH_STATE_READY       CudaHealthState = 1
+	CudaHealthState_CUDA_HEALTH_STATE_UNAVAILABLE CudaHealthState = 2
+)
+
+// Enum value maps for CudaHealthState.
+var (
+	CudaHealthState_name = map[int32]string{
+		0: "CUDA_HEALTH_STATE_UNSPECIFIED",
+		1: "CUDA_HEALTH_STATE_READY",
+		2: "CUDA_HEALTH_STATE_UNAVAILABLE",
+	}
+	CudaHealthState_value = map[string]int32{
+		"CUDA_HEALTH_STATE_UNSPECIFIED": 0,
+		"CUDA_HEALTH_STATE_READY":       1,
+		"CUDA_HEALTH_STATE_UNAVAILABLE": 2,
+	}
+)
+
+func (x CudaHealthState) Enum() *CudaHealthState {
+	p := new(CudaHealthState)
+	*p = x
+	return p
+}
+
+func (x CudaHealthState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CudaHealthState) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_worker_proto_enumTypes[0].Descriptor()
+}
+
+func (CudaHealthState) Type() protoreflect.EnumType {
+	return &file_proto_worker_proto_enumTypes[0]
+}
+
+func (x CudaHealthState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CudaHealthState.Descriptor instead.
+func (CudaHealthState) EnumDescriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{0}
+}
 
 // Wire states are independent of database state numbers. UNSPECIFIED is never
 // returned by a successful GetJob operation.
@@ -68,11 +119,11 @@ func (x JobState) String() string {
 }
 
 func (JobState) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_worker_proto_enumTypes[0].Descriptor()
+	return file_proto_worker_proto_enumTypes[1].Descriptor()
 }
 
 func (JobState) Type() protoreflect.EnumType {
-	return &file_proto_worker_proto_enumTypes[0]
+	return &file_proto_worker_proto_enumTypes[1]
 }
 
 func (x JobState) Number() protoreflect.EnumNumber {
@@ -81,7 +132,172 @@ func (x JobState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use JobState.Descriptor instead.
 func (JobState) EnumDescriptor() ([]byte, []int) {
-	return file_proto_worker_proto_rawDescGZIP(), []int{0}
+	return file_proto_worker_proto_rawDescGZIP(), []int{1}
+}
+
+type RecordedWorkerLiveness int32
+
+const (
+	RecordedWorkerLiveness_RECORDED_WORKER_LIVENESS_UNSPECIFIED RecordedWorkerLiveness = 0
+	RecordedWorkerLiveness_RECORDED_WORKER_LIVENESS_ALIVE       RecordedWorkerLiveness = 1
+	RecordedWorkerLiveness_RECORDED_WORKER_LIVENESS_DEAD        RecordedWorkerLiveness = 2
+)
+
+// Enum value maps for RecordedWorkerLiveness.
+var (
+	RecordedWorkerLiveness_name = map[int32]string{
+		0: "RECORDED_WORKER_LIVENESS_UNSPECIFIED",
+		1: "RECORDED_WORKER_LIVENESS_ALIVE",
+		2: "RECORDED_WORKER_LIVENESS_DEAD",
+	}
+	RecordedWorkerLiveness_value = map[string]int32{
+		"RECORDED_WORKER_LIVENESS_UNSPECIFIED": 0,
+		"RECORDED_WORKER_LIVENESS_ALIVE":       1,
+		"RECORDED_WORKER_LIVENESS_DEAD":        2,
+	}
+)
+
+func (x RecordedWorkerLiveness) Enum() *RecordedWorkerLiveness {
+	p := new(RecordedWorkerLiveness)
+	*p = x
+	return p
+}
+
+func (x RecordedWorkerLiveness) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RecordedWorkerLiveness) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_worker_proto_enumTypes[2].Descriptor()
+}
+
+func (RecordedWorkerLiveness) Type() protoreflect.EnumType {
+	return &file_proto_worker_proto_enumTypes[2]
+}
+
+func (x RecordedWorkerLiveness) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RecordedWorkerLiveness.Descriptor instead.
+func (RecordedWorkerLiveness) EnumDescriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{2}
+}
+
+type CudaEvidenceFreshness int32
+
+const (
+	CudaEvidenceFreshness_CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED CudaEvidenceFreshness = 0
+	CudaEvidenceFreshness_CUDA_EVIDENCE_FRESHNESS_FRESH       CudaEvidenceFreshness = 1
+	CudaEvidenceFreshness_CUDA_EVIDENCE_FRESHNESS_EXPIRED     CudaEvidenceFreshness = 2
+)
+
+// Enum value maps for CudaEvidenceFreshness.
+var (
+	CudaEvidenceFreshness_name = map[int32]string{
+		0: "CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED",
+		1: "CUDA_EVIDENCE_FRESHNESS_FRESH",
+		2: "CUDA_EVIDENCE_FRESHNESS_EXPIRED",
+	}
+	CudaEvidenceFreshness_value = map[string]int32{
+		"CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED": 0,
+		"CUDA_EVIDENCE_FRESHNESS_FRESH":       1,
+		"CUDA_EVIDENCE_FRESHNESS_EXPIRED":     2,
+	}
+)
+
+func (x CudaEvidenceFreshness) Enum() *CudaEvidenceFreshness {
+	p := new(CudaEvidenceFreshness)
+	*p = x
+	return p
+}
+
+func (x CudaEvidenceFreshness) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CudaEvidenceFreshness) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_worker_proto_enumTypes[3].Descriptor()
+}
+
+func (CudaEvidenceFreshness) Type() protoreflect.EnumType {
+	return &file_proto_worker_proto_enumTypes[3]
+}
+
+func (x CudaEvidenceFreshness) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CudaEvidenceFreshness.Descriptor instead.
+func (CudaEvidenceFreshness) EnumDescriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{3}
+}
+
+type PlacementInterpretation int32
+
+const (
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_UNSPECIFIED            PlacementInterpretation = 0
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_NO_CONFIGURED_WORKER   PlacementInterpretation = 1
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_NO_ALIVE_WORKER        PlacementInterpretation = 2
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_NO_ELIGIBLE_WORKER     PlacementInterpretation = 3
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_ELIGIBLE_WORKER_EXISTS PlacementInterpretation = 4
+	// The durable record is terminal. No placement diagnosis applies.
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_NOT_APPLICABLE PlacementInterpretation = 5
+	// Revalidation observed a different durable record. No placement conclusion.
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_JOB_CHANGED PlacementInterpretation = 6
+	// A durable Running record cannot attest live Attempt or lease authority.
+	PlacementInterpretation_PLACEMENT_INTERPRETATION_UNKNOWN PlacementInterpretation = 7
+)
+
+// Enum value maps for PlacementInterpretation.
+var (
+	PlacementInterpretation_name = map[int32]string{
+		0: "PLACEMENT_INTERPRETATION_UNSPECIFIED",
+		1: "PLACEMENT_INTERPRETATION_NO_CONFIGURED_WORKER",
+		2: "PLACEMENT_INTERPRETATION_NO_ALIVE_WORKER",
+		3: "PLACEMENT_INTERPRETATION_NO_ELIGIBLE_WORKER",
+		4: "PLACEMENT_INTERPRETATION_ELIGIBLE_WORKER_EXISTS",
+		5: "PLACEMENT_INTERPRETATION_NOT_APPLICABLE",
+		6: "PLACEMENT_INTERPRETATION_JOB_CHANGED",
+		7: "PLACEMENT_INTERPRETATION_UNKNOWN",
+	}
+	PlacementInterpretation_value = map[string]int32{
+		"PLACEMENT_INTERPRETATION_UNSPECIFIED":            0,
+		"PLACEMENT_INTERPRETATION_NO_CONFIGURED_WORKER":   1,
+		"PLACEMENT_INTERPRETATION_NO_ALIVE_WORKER":        2,
+		"PLACEMENT_INTERPRETATION_NO_ELIGIBLE_WORKER":     3,
+		"PLACEMENT_INTERPRETATION_ELIGIBLE_WORKER_EXISTS": 4,
+		"PLACEMENT_INTERPRETATION_NOT_APPLICABLE":         5,
+		"PLACEMENT_INTERPRETATION_JOB_CHANGED":            6,
+		"PLACEMENT_INTERPRETATION_UNKNOWN":                7,
+	}
+)
+
+func (x PlacementInterpretation) Enum() *PlacementInterpretation {
+	p := new(PlacementInterpretation)
+	*p = x
+	return p
+}
+
+func (x PlacementInterpretation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PlacementInterpretation) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_worker_proto_enumTypes[4].Descriptor()
+}
+
+func (PlacementInterpretation) Type() protoreflect.EnumType {
+	return &file_proto_worker_proto_enumTypes[4]
+}
+
+func (x PlacementInterpretation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PlacementInterpretation.Descriptor instead.
+func (PlacementInterpretation) EnumDescriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{4}
 }
 
 type ExecuteJobRequest struct {
@@ -246,9 +462,12 @@ type RegisterWorkerRequest struct {
 	// Workers. Permits idempotent retries if a registration reply was lost.
 	RegistrationKey []byte `protobuf:"bytes,4,opt,name=registration_key,json=registrationKey,proto3" json:"registration_key,omitempty"`
 	// Last accepted Coordinator token, if any.
-	SessionToken  []byte `protobuf:"bytes,5,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SessionToken []byte `protobuf:"bytes,5,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
+	// Session-aware advertisement for a configured CUDA backend. Omit the
+	// ordinary CUDA task advertisement when using this mode.
+	CudaHealthManaged bool `protobuf:"varint,6,opt,name=cuda_health_managed,json=cudaHealthManaged,proto3" json:"cuda_health_managed,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RegisterWorkerRequest) Reset() {
@@ -314,6 +533,13 @@ func (x *RegisterWorkerRequest) GetSessionToken() []byte {
 		return x.SessionToken
 	}
 	return nil
+}
+
+func (x *RegisterWorkerRequest) GetCudaHealthManaged() bool {
+	if x != nil {
+		return x.CudaHealthManaged
+	}
+	return false
 }
 
 type RegisterWorkerResponse struct {
@@ -524,6 +750,7 @@ type HeartbeatRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	SessionToken  []byte                 `protobuf:"bytes,2,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
+	CudaHealth    *CudaHealthObservation `protobuf:"bytes,3,opt,name=cuda_health,json=cudaHealth,proto3" json:"cuda_health,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -572,11 +799,20 @@ func (x *HeartbeatRequest) GetSessionToken() []byte {
 	return nil
 }
 
+func (x *HeartbeatRequest) GetCudaHealth() *CudaHealthObservation {
+	if x != nil {
+		return x.CudaHealth
+	}
+	return nil
+}
+
 type HeartbeatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Accepted      bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Accepted bool                   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	// Coordinator-issued, scoped to the current session. Zero means unavailable.
+	CudaHealthProbeAnchor uint64 `protobuf:"varint,2,opt,name=cuda_health_probe_anchor,json=cudaHealthProbeAnchor,proto3" json:"cuda_health_probe_anchor,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *HeartbeatResponse) Reset() {
@@ -616,6 +852,74 @@ func (x *HeartbeatResponse) GetAccepted() bool {
 	return false
 }
 
+func (x *HeartbeatResponse) GetCudaHealthProbeAnchor() uint64 {
+	if x != nil {
+		return x.CudaHealthProbeAnchor
+	}
+	return 0
+}
+
+type CudaHealthObservation struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ObservationSeq uint64                 `protobuf:"varint,1,opt,name=observation_seq,json=observationSeq,proto3" json:"observation_seq,omitempty"`
+	State          CudaHealthState        `protobuf:"varint,2,opt,name=state,proto3,enum=runtime.CudaHealthState" json:"state,omitempty"`
+	// The anchor received before the check began. Never re-anchor a result.
+	ProbeAnchor   uint64 `protobuf:"varint,3,opt,name=probe_anchor,json=probeAnchor,proto3" json:"probe_anchor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CudaHealthObservation) Reset() {
+	*x = CudaHealthObservation{}
+	mi := &file_proto_worker_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CudaHealthObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CudaHealthObservation) ProtoMessage() {}
+
+func (x *CudaHealthObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CudaHealthObservation.ProtoReflect.Descriptor instead.
+func (*CudaHealthObservation) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CudaHealthObservation) GetObservationSeq() uint64 {
+	if x != nil {
+		return x.ObservationSeq
+	}
+	return 0
+}
+
+func (x *CudaHealthObservation) GetState() CudaHealthState {
+	if x != nil {
+		return x.State
+	}
+	return CudaHealthState_CUDA_HEALTH_STATE_UNSPECIFIED
+}
+
+func (x *CudaHealthObservation) GetProbeAnchor() uint64 {
+	if x != nil {
+		return x.ProbeAnchor
+	}
+	return 0
+}
+
 type GetJobRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Same opaque signed int64 identity as SubmitJob; zero and negative IDs are valid.
@@ -626,7 +930,7 @@ type GetJobRequest struct {
 
 func (x *GetJobRequest) Reset() {
 	*x = GetJobRequest{}
-	mi := &file_proto_worker_proto_msgTypes[8]
+	mi := &file_proto_worker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -638,7 +942,7 @@ func (x *GetJobRequest) String() string {
 func (*GetJobRequest) ProtoMessage() {}
 
 func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_worker_proto_msgTypes[8]
+	mi := &file_proto_worker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -651,7 +955,7 @@ func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobRequest.ProtoReflect.Descriptor instead.
 func (*GetJobRequest) Descriptor() ([]byte, []int) {
-	return file_proto_worker_proto_rawDescGZIP(), []int{8}
+	return file_proto_worker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetJobRequest) GetJobId() int64 {
@@ -678,7 +982,7 @@ type GetJobResponse struct {
 
 func (x *GetJobResponse) Reset() {
 	*x = GetJobResponse{}
-	mi := &file_proto_worker_proto_msgTypes[9]
+	mi := &file_proto_worker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -690,7 +994,7 @@ func (x *GetJobResponse) String() string {
 func (*GetJobResponse) ProtoMessage() {}
 
 func (x *GetJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_worker_proto_msgTypes[9]
+	mi := &file_proto_worker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -703,7 +1007,7 @@ func (x *GetJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobResponse.ProtoReflect.Descriptor instead.
 func (*GetJobResponse) Descriptor() ([]byte, []int) {
-	return file_proto_worker_proto_rawDescGZIP(), []int{9}
+	return file_proto_worker_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetJobResponse) GetJobId() int64 {
@@ -755,11 +1059,388 @@ func (x *GetJobResponse) GetError() string {
 	return ""
 }
 
+type ListWorkersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkersRequest) Reset() {
+	*x = ListWorkersRequest{}
+	mi := &file_proto_worker_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkersRequest) ProtoMessage() {}
+
+func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
+func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{11}
+}
+
+type ListWorkersResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	WorkerSnapshotAt *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=worker_snapshot_at,json=workerSnapshotAt,proto3" json:"worker_snapshot_at,omitempty"`
+	Workers          []*WorkerDiagnostic    `protobuf:"bytes,2,rep,name=workers,proto3" json:"workers,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ListWorkersResponse) Reset() {
+	*x = ListWorkersResponse{}
+	mi := &file_proto_worker_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkersResponse) ProtoMessage() {}
+
+func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
+func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ListWorkersResponse) GetWorkerSnapshotAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.WorkerSnapshotAt
+	}
+	return nil
+}
+
+func (x *ListWorkersResponse) GetWorkers() []*WorkerDiagnostic {
+	if x != nil {
+		return x.Workers
+	}
+	return nil
+}
+
+type WorkerDiagnostic struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	// Recorded status. Alive neither proves reachability nor rechecks the timeout.
+	Liveness RecordedWorkerLiveness `protobuf:"varint,2,opt,name=liveness,proto3,enum=runtime.RecordedWorkerLiveness" json:"liveness,omitempty"`
+	// Time since the last accepted registration or heartbeat at worker_snapshot_at.
+	LastSeenAge *durationpb.Duration `protobuf:"bytes,3,opt,name=last_seen_age,json=lastSeenAge,proto3" json:"last_seen_age,omitempty"`
+	// Recognized configured capabilities, including CUDA when advertised as managed.
+	ExternalTaskTypes []string `protobuf:"bytes,4,rep,name=external_task_types,json=externalTaskTypes,proto3" json:"external_task_types,omitempty"`
+	CudaHealthManaged bool     `protobuf:"varint,5,opt,name=cuda_health_managed,json=cudaHealthManaged,proto3" json:"cuda_health_managed,omitempty"`
+	// UNSPECIFIED is Unknown for a managed Worker and inapplicable for unmanaged.
+	EffectiveCudaHealth CudaHealthState `protobuf:"varint,6,opt,name=effective_cuda_health,json=effectiveCudaHealth,proto3,enum=runtime.CudaHealthState" json:"effective_cuda_health,omitempty"`
+	// UNSPECIFIED means there is no accepted managed evidence.
+	CudaEvidenceFreshness CudaEvidenceFreshness `protobuf:"varint,7,opt,name=cuda_evidence_freshness,json=cudaEvidenceFreshness,proto3,enum=runtime.CudaEvidenceFreshness" json:"cuda_evidence_freshness,omitempty"`
+	// Present only for fresh evidence, including fresh Unavailable.
+	CudaFreshFor *durationpb.Duration `protobuf:"bytes,8,opt,name=cuda_fresh_for,json=cudaFreshFor,proto3" json:"cuda_fresh_for,omitempty"`
+	// Current placement eligibility for known supported tasks, independent of slot occupancy.
+	EligibleTaskTypes []string `protobuf:"bytes,9,rep,name=eligible_task_types,json=eligibleTaskTypes,proto3" json:"eligible_task_types,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *WorkerDiagnostic) Reset() {
+	*x = WorkerDiagnostic{}
+	mi := &file_proto_worker_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerDiagnostic) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerDiagnostic) ProtoMessage() {}
+
+func (x *WorkerDiagnostic) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerDiagnostic.ProtoReflect.Descriptor instead.
+func (*WorkerDiagnostic) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *WorkerDiagnostic) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *WorkerDiagnostic) GetLiveness() RecordedWorkerLiveness {
+	if x != nil {
+		return x.Liveness
+	}
+	return RecordedWorkerLiveness_RECORDED_WORKER_LIVENESS_UNSPECIFIED
+}
+
+func (x *WorkerDiagnostic) GetLastSeenAge() *durationpb.Duration {
+	if x != nil {
+		return x.LastSeenAge
+	}
+	return nil
+}
+
+func (x *WorkerDiagnostic) GetExternalTaskTypes() []string {
+	if x != nil {
+		return x.ExternalTaskTypes
+	}
+	return nil
+}
+
+func (x *WorkerDiagnostic) GetCudaHealthManaged() bool {
+	if x != nil {
+		return x.CudaHealthManaged
+	}
+	return false
+}
+
+func (x *WorkerDiagnostic) GetEffectiveCudaHealth() CudaHealthState {
+	if x != nil {
+		return x.EffectiveCudaHealth
+	}
+	return CudaHealthState_CUDA_HEALTH_STATE_UNSPECIFIED
+}
+
+func (x *WorkerDiagnostic) GetCudaEvidenceFreshness() CudaEvidenceFreshness {
+	if x != nil {
+		return x.CudaEvidenceFreshness
+	}
+	return CudaEvidenceFreshness_CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED
+}
+
+func (x *WorkerDiagnostic) GetCudaFreshFor() *durationpb.Duration {
+	if x != nil {
+		return x.CudaFreshFor
+	}
+	return nil
+}
+
+func (x *WorkerDiagnostic) GetEligibleTaskTypes() []string {
+	if x != nil {
+		return x.EligibleTaskTypes
+	}
+	return nil
+}
+
+type DiagnoseJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiagnoseJobRequest) Reset() {
+	*x = DiagnoseJobRequest{}
+	mi := &file_proto_worker_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiagnoseJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiagnoseJobRequest) ProtoMessage() {}
+
+func (x *DiagnoseJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiagnoseJobRequest.ProtoReflect.Descriptor instead.
+func (*DiagnoseJobRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DiagnoseJobRequest) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+type DiagnoseJobResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Fields 1-6 are from the first durable read. Attempt ID is the recorded
+	// generation. A Running record alone does not attest live lease authority.
+	JobId           int64    `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	State           JobState `protobuf:"varint,2,opt,name=state,proto3,enum=runtime.JobState" json:"state,omitempty"`
+	TaskType        string   `protobuf:"bytes,3,opt,name=task_type,json=taskType,proto3" json:"task_type,omitempty"`
+	AttemptId       int64    `protobuf:"varint,4,opt,name=attempt_id,json=attemptId,proto3" json:"attempt_id,omitempty"`
+	WorkerId        string   `protobuf:"bytes,5,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	HasWorkerResult bool     `protobuf:"varint,6,opt,name=has_worker_result,json=hasWorkerResult,proto3" json:"has_worker_result,omitempty"`
+	// Sampled between two durable reads. This is not a joint transaction.
+	WorkerSnapshotAt       *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=worker_snapshot_at,json=workerSnapshotAt,proto3" json:"worker_snapshot_at,omitempty"`
+	ConfiguredWorkers      uint32                 `protobuf:"varint,8,opt,name=configured_workers,json=configuredWorkers,proto3" json:"configured_workers,omitempty"`
+	AliveCompatibleWorkers uint32                 `protobuf:"varint,9,opt,name=alive_compatible_workers,json=aliveCompatibleWorkers,proto3" json:"alive_compatible_workers,omitempty"`
+	// The pre-dispatch placement predicate, independent of execution or scheduling.
+	EligibleWorkers uint32 `protobuf:"varint,10,opt,name=eligible_workers,json=eligibleWorkers,proto3" json:"eligible_workers,omitempty"`
+	// Current conditions only. Historical queue reasons, scheduler delay,
+	// cooldown and live Attempt authority cannot be determined here.
+	Interpretation PlacementInterpretation `protobuf:"varint,11,opt,name=interpretation,proto3,enum=runtime.PlacementInterpretation" json:"interpretation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *DiagnoseJobResponse) Reset() {
+	*x = DiagnoseJobResponse{}
+	mi := &file_proto_worker_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiagnoseJobResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiagnoseJobResponse) ProtoMessage() {}
+
+func (x *DiagnoseJobResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiagnoseJobResponse.ProtoReflect.Descriptor instead.
+func (*DiagnoseJobResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DiagnoseJobResponse) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+func (x *DiagnoseJobResponse) GetState() JobState {
+	if x != nil {
+		return x.State
+	}
+	return JobState_JOB_STATE_UNSPECIFIED
+}
+
+func (x *DiagnoseJobResponse) GetTaskType() string {
+	if x != nil {
+		return x.TaskType
+	}
+	return ""
+}
+
+func (x *DiagnoseJobResponse) GetAttemptId() int64 {
+	if x != nil {
+		return x.AttemptId
+	}
+	return 0
+}
+
+func (x *DiagnoseJobResponse) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *DiagnoseJobResponse) GetHasWorkerResult() bool {
+	if x != nil {
+		return x.HasWorkerResult
+	}
+	return false
+}
+
+func (x *DiagnoseJobResponse) GetWorkerSnapshotAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.WorkerSnapshotAt
+	}
+	return nil
+}
+
+func (x *DiagnoseJobResponse) GetConfiguredWorkers() uint32 {
+	if x != nil {
+		return x.ConfiguredWorkers
+	}
+	return 0
+}
+
+func (x *DiagnoseJobResponse) GetAliveCompatibleWorkers() uint32 {
+	if x != nil {
+		return x.AliveCompatibleWorkers
+	}
+	return 0
+}
+
+func (x *DiagnoseJobResponse) GetEligibleWorkers() uint32 {
+	if x != nil {
+		return x.EligibleWorkers
+	}
+	return 0
+}
+
+func (x *DiagnoseJobResponse) GetInterpretation() PlacementInterpretation {
+	if x != nil {
+		return x.Interpretation
+	}
+	return PlacementInterpretation_PLACEMENT_INTERPRETATION_UNSPECIFIED
+}
+
 var File_proto_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x12proto/worker.proto\x12\aruntime\"\x9f\x01\n" +
+	"\x12proto/worker.proto\x12\aruntime\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x9f\x01\n" +
 	"\x11ExecuteJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
 	"\ttask_type\x18\x02 \x01(\tR\btaskType\x12\x18\n" +
@@ -774,13 +1455,14 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1d\n" +
 	"\n" +
-	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"\xce\x01\n" +
+	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"\xfe\x01\n" +
 	"\x15RegisterWorkerRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12.\n" +
 	"\x13external_task_types\x18\x03 \x03(\tR\x11externalTaskTypes\x12)\n" +
 	"\x10registration_key\x18\x04 \x01(\fR\x0fregistrationKey\x12#\n" +
-	"\rsession_token\x18\x05 \x01(\fR\fsessionToken\"o\n" +
+	"\rsession_token\x18\x05 \x01(\fR\fsessionToken\x12.\n" +
+	"\x13cuda_health_managed\x18\x06 \x01(\bR\x11cudaHealthManaged\"o\n" +
 	"\x16RegisterWorkerResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12#\n" +
@@ -797,12 +1479,19 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1d\n" +
 	"\n" +
-	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"T\n" +
+	"attempt_id\x18\x05 \x01(\x03R\tattemptId\"\x95\x01\n" +
 	"\x10HeartbeatRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12#\n" +
-	"\rsession_token\x18\x02 \x01(\fR\fsessionToken\"/\n" +
+	"\rsession_token\x18\x02 \x01(\fR\fsessionToken\x12?\n" +
+	"\vcuda_health\x18\x03 \x01(\v2\x1e.runtime.CudaHealthObservationR\n" +
+	"cudaHealth\"h\n" +
 	"\x11HeartbeatResponse\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\"&\n" +
+	"\baccepted\x18\x01 \x01(\bR\baccepted\x127\n" +
+	"\x18cuda_health_probe_anchor\x18\x02 \x01(\x04R\x15cudaHealthProbeAnchor\"\x93\x01\n" +
+	"\x15CudaHealthObservation\x12'\n" +
+	"\x0fobservation_seq\x18\x01 \x01(\x04R\x0eobservationSeq\x12.\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x18.runtime.CudaHealthStateR\x05state\x12!\n" +
+	"\fprobe_anchor\x18\x03 \x01(\x04R\vprobeAnchor\"&\n" +
 	"\rGetJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\xe6\x01\n" +
 	"\x0eGetJobResponse\x12\x15\n" +
@@ -813,7 +1502,41 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12*\n" +
 	"\x11has_worker_result\x18\x05 \x01(\bR\x0fhasWorkerResult\x12\x16\n" +
 	"\x06output\x18\x06 \x01(\tR\x06output\x12\x14\n" +
-	"\x05error\x18\a \x01(\tR\x05error*\xb4\x01\n" +
+	"\x05error\x18\a \x01(\tR\x05error\"\x14\n" +
+	"\x12ListWorkersRequest\"\x94\x01\n" +
+	"\x13ListWorkersResponse\x12H\n" +
+	"\x12worker_snapshot_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x10workerSnapshotAt\x123\n" +
+	"\aworkers\x18\x02 \x03(\v2\x19.runtime.WorkerDiagnosticR\aworkers\"\xa2\x04\n" +
+	"\x10WorkerDiagnostic\x12\x1b\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12;\n" +
+	"\bliveness\x18\x02 \x01(\x0e2\x1f.runtime.RecordedWorkerLivenessR\bliveness\x12=\n" +
+	"\rlast_seen_age\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\vlastSeenAge\x12.\n" +
+	"\x13external_task_types\x18\x04 \x03(\tR\x11externalTaskTypes\x12.\n" +
+	"\x13cuda_health_managed\x18\x05 \x01(\bR\x11cudaHealthManaged\x12L\n" +
+	"\x15effective_cuda_health\x18\x06 \x01(\x0e2\x18.runtime.CudaHealthStateR\x13effectiveCudaHealth\x12V\n" +
+	"\x17cuda_evidence_freshness\x18\a \x01(\x0e2\x1e.runtime.CudaEvidenceFreshnessR\x15cudaEvidenceFreshness\x12?\n" +
+	"\x0ecuda_fresh_for\x18\b \x01(\v2\x19.google.protobuf.DurationR\fcudaFreshFor\x12.\n" +
+	"\x13eligible_task_types\x18\t \x03(\tR\x11eligibleTaskTypes\"+\n" +
+	"\x12DiagnoseJobRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\x82\x04\n" +
+	"\x13DiagnoseJobResponse\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12'\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x11.runtime.JobStateR\x05state\x12\x1b\n" +
+	"\ttask_type\x18\x03 \x01(\tR\btaskType\x12\x1d\n" +
+	"\n" +
+	"attempt_id\x18\x04 \x01(\x03R\tattemptId\x12\x1b\n" +
+	"\tworker_id\x18\x05 \x01(\tR\bworkerId\x12*\n" +
+	"\x11has_worker_result\x18\x06 \x01(\bR\x0fhasWorkerResult\x12H\n" +
+	"\x12worker_snapshot_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\x10workerSnapshotAt\x12-\n" +
+	"\x12configured_workers\x18\b \x01(\rR\x11configuredWorkers\x128\n" +
+	"\x18alive_compatible_workers\x18\t \x01(\rR\x16aliveCompatibleWorkers\x12)\n" +
+	"\x10eligible_workers\x18\n" +
+	" \x01(\rR\x0feligibleWorkers\x12H\n" +
+	"\x0einterpretation\x18\v \x01(\x0e2 .runtime.PlacementInterpretationR\x0einterpretation*t\n" +
+	"\x0fCudaHealthState\x12!\n" +
+	"\x1dCUDA_HEALTH_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17CUDA_HEALTH_STATE_READY\x10\x01\x12!\n" +
+	"\x1dCUDA_HEALTH_STATE_UNAVAILABLE\x10\x02*\xb4\x01\n" +
 	"\bJobState\x12\x19\n" +
 	"\x15JOB_STATE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10JOB_STATE_QUEUED\x10\x01\x12\x15\n" +
@@ -821,15 +1544,34 @@ const file_proto_worker_proto_rawDesc = "" +
 	"\x14JOB_STATE_RECOVERING\x10\x03\x12\x17\n" +
 	"\x13JOB_STATE_SUCCEEDED\x10\x04\x12\x14\n" +
 	"\x10JOB_STATE_FAILED\x10\x05\x12\x17\n" +
-	"\x13JOB_STATE_CANCELLED\x10\x062V\n" +
+	"\x13JOB_STATE_CANCELLED\x10\x06*\x89\x01\n" +
+	"\x16RecordedWorkerLiveness\x12(\n" +
+	"$RECORDED_WORKER_LIVENESS_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eRECORDED_WORKER_LIVENESS_ALIVE\x10\x01\x12!\n" +
+	"\x1dRECORDED_WORKER_LIVENESS_DEAD\x10\x02*\x88\x01\n" +
+	"\x15CudaEvidenceFreshness\x12'\n" +
+	"#CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dCUDA_EVIDENCE_FRESHNESS_FRESH\x10\x01\x12#\n" +
+	"\x1fCUDA_EVIDENCE_FRESHNESS_EXPIRED\x10\x02*\x87\x03\n" +
+	"\x17PlacementInterpretation\x12(\n" +
+	"$PLACEMENT_INTERPRETATION_UNSPECIFIED\x10\x00\x121\n" +
+	"-PLACEMENT_INTERPRETATION_NO_CONFIGURED_WORKER\x10\x01\x12,\n" +
+	"(PLACEMENT_INTERPRETATION_NO_ALIVE_WORKER\x10\x02\x12/\n" +
+	"+PLACEMENT_INTERPRETATION_NO_ELIGIBLE_WORKER\x10\x03\x123\n" +
+	"/PLACEMENT_INTERPRETATION_ELIGIBLE_WORKER_EXISTS\x10\x04\x12+\n" +
+	"'PLACEMENT_INTERPRETATION_NOT_APPLICABLE\x10\x05\x12(\n" +
+	"$PLACEMENT_INTERPRETATION_JOB_CHANGED\x10\x06\x12$\n" +
+	" PLACEMENT_INTERPRETATION_UNKNOWN\x10\a2V\n" +
 	"\rWorkerService\x12E\n" +
 	"\n" +
-	"ExecuteJob\x12\x1a.runtime.ExecuteJobRequest\x1a\x1b.runtime.ExecuteJobResponse2\xaa\x02\n" +
+	"ExecuteJob\x12\x1a.runtime.ExecuteJobRequest\x1a\x1b.runtime.ExecuteJobResponse2\xbe\x03\n" +
 	"\x12CoordinatorService\x12Q\n" +
 	"\x0eRegisterWorker\x12\x1e.runtime.RegisterWorkerRequest\x1a\x1f.runtime.RegisterWorkerResponse\x12B\n" +
 	"\tSubmitJob\x12\x19.runtime.SubmitJobRequest\x1a\x1a.runtime.SubmitJobResponse\x12B\n" +
 	"\tHeartbeat\x12\x19.runtime.HeartbeatRequest\x1a\x1a.runtime.HeartbeatResponse\x129\n" +
-	"\x06GetJob\x12\x16.runtime.GetJobRequest\x1a\x17.runtime.GetJobResponseBBZ@github.com/guangong789/DistributedComputeRuntime/proto;runtimepbb\x06proto3"
+	"\x06GetJob\x12\x16.runtime.GetJobRequest\x1a\x17.runtime.GetJobResponse\x12H\n" +
+	"\vListWorkers\x12\x1b.runtime.ListWorkersRequest\x1a\x1c.runtime.ListWorkersResponse\x12H\n" +
+	"\vDiagnoseJob\x12\x1b.runtime.DiagnoseJobRequest\x1a\x1c.runtime.DiagnoseJobResponseBBZ@github.com/guangong789/DistributedComputeRuntime/proto;runtimepbb\x06proto3"
 
 var (
 	file_proto_worker_proto_rawDescOnce sync.Once
@@ -843,38 +1585,66 @@ func file_proto_worker_proto_rawDescGZIP() []byte {
 	return file_proto_worker_proto_rawDescData
 }
 
-var file_proto_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_proto_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_proto_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_proto_worker_proto_goTypes = []any{
-	(JobState)(0),                  // 0: runtime.JobState
-	(*ExecuteJobRequest)(nil),      // 1: runtime.ExecuteJobRequest
-	(*ExecuteJobResponse)(nil),     // 2: runtime.ExecuteJobResponse
-	(*RegisterWorkerRequest)(nil),  // 3: runtime.RegisterWorkerRequest
-	(*RegisterWorkerResponse)(nil), // 4: runtime.RegisterWorkerResponse
-	(*SubmitJobRequest)(nil),       // 5: runtime.SubmitJobRequest
-	(*SubmitJobResponse)(nil),      // 6: runtime.SubmitJobResponse
-	(*HeartbeatRequest)(nil),       // 7: runtime.HeartbeatRequest
-	(*HeartbeatResponse)(nil),      // 8: runtime.HeartbeatResponse
-	(*GetJobRequest)(nil),          // 9: runtime.GetJobRequest
-	(*GetJobResponse)(nil),         // 10: runtime.GetJobResponse
+	(CudaHealthState)(0),           // 0: runtime.CudaHealthState
+	(JobState)(0),                  // 1: runtime.JobState
+	(RecordedWorkerLiveness)(0),    // 2: runtime.RecordedWorkerLiveness
+	(CudaEvidenceFreshness)(0),     // 3: runtime.CudaEvidenceFreshness
+	(PlacementInterpretation)(0),   // 4: runtime.PlacementInterpretation
+	(*ExecuteJobRequest)(nil),      // 5: runtime.ExecuteJobRequest
+	(*ExecuteJobResponse)(nil),     // 6: runtime.ExecuteJobResponse
+	(*RegisterWorkerRequest)(nil),  // 7: runtime.RegisterWorkerRequest
+	(*RegisterWorkerResponse)(nil), // 8: runtime.RegisterWorkerResponse
+	(*SubmitJobRequest)(nil),       // 9: runtime.SubmitJobRequest
+	(*SubmitJobResponse)(nil),      // 10: runtime.SubmitJobResponse
+	(*HeartbeatRequest)(nil),       // 11: runtime.HeartbeatRequest
+	(*HeartbeatResponse)(nil),      // 12: runtime.HeartbeatResponse
+	(*CudaHealthObservation)(nil),  // 13: runtime.CudaHealthObservation
+	(*GetJobRequest)(nil),          // 14: runtime.GetJobRequest
+	(*GetJobResponse)(nil),         // 15: runtime.GetJobResponse
+	(*ListWorkersRequest)(nil),     // 16: runtime.ListWorkersRequest
+	(*ListWorkersResponse)(nil),    // 17: runtime.ListWorkersResponse
+	(*WorkerDiagnostic)(nil),       // 18: runtime.WorkerDiagnostic
+	(*DiagnoseJobRequest)(nil),     // 19: runtime.DiagnoseJobRequest
+	(*DiagnoseJobResponse)(nil),    // 20: runtime.DiagnoseJobResponse
+	(*timestamppb.Timestamp)(nil),  // 21: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),    // 22: google.protobuf.Duration
 }
 var file_proto_worker_proto_depIdxs = []int32{
-	0,  // 0: runtime.GetJobResponse.state:type_name -> runtime.JobState
-	1,  // 1: runtime.WorkerService.ExecuteJob:input_type -> runtime.ExecuteJobRequest
-	3,  // 2: runtime.CoordinatorService.RegisterWorker:input_type -> runtime.RegisterWorkerRequest
-	5,  // 3: runtime.CoordinatorService.SubmitJob:input_type -> runtime.SubmitJobRequest
-	7,  // 4: runtime.CoordinatorService.Heartbeat:input_type -> runtime.HeartbeatRequest
-	9,  // 5: runtime.CoordinatorService.GetJob:input_type -> runtime.GetJobRequest
-	2,  // 6: runtime.WorkerService.ExecuteJob:output_type -> runtime.ExecuteJobResponse
-	4,  // 7: runtime.CoordinatorService.RegisterWorker:output_type -> runtime.RegisterWorkerResponse
-	6,  // 8: runtime.CoordinatorService.SubmitJob:output_type -> runtime.SubmitJobResponse
-	8,  // 9: runtime.CoordinatorService.Heartbeat:output_type -> runtime.HeartbeatResponse
-	10, // 10: runtime.CoordinatorService.GetJob:output_type -> runtime.GetJobResponse
-	6,  // [6:11] is the sub-list for method output_type
-	1,  // [1:6] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	13, // 0: runtime.HeartbeatRequest.cuda_health:type_name -> runtime.CudaHealthObservation
+	0,  // 1: runtime.CudaHealthObservation.state:type_name -> runtime.CudaHealthState
+	1,  // 2: runtime.GetJobResponse.state:type_name -> runtime.JobState
+	21, // 3: runtime.ListWorkersResponse.worker_snapshot_at:type_name -> google.protobuf.Timestamp
+	18, // 4: runtime.ListWorkersResponse.workers:type_name -> runtime.WorkerDiagnostic
+	2,  // 5: runtime.WorkerDiagnostic.liveness:type_name -> runtime.RecordedWorkerLiveness
+	22, // 6: runtime.WorkerDiagnostic.last_seen_age:type_name -> google.protobuf.Duration
+	0,  // 7: runtime.WorkerDiagnostic.effective_cuda_health:type_name -> runtime.CudaHealthState
+	3,  // 8: runtime.WorkerDiagnostic.cuda_evidence_freshness:type_name -> runtime.CudaEvidenceFreshness
+	22, // 9: runtime.WorkerDiagnostic.cuda_fresh_for:type_name -> google.protobuf.Duration
+	1,  // 10: runtime.DiagnoseJobResponse.state:type_name -> runtime.JobState
+	21, // 11: runtime.DiagnoseJobResponse.worker_snapshot_at:type_name -> google.protobuf.Timestamp
+	4,  // 12: runtime.DiagnoseJobResponse.interpretation:type_name -> runtime.PlacementInterpretation
+	5,  // 13: runtime.WorkerService.ExecuteJob:input_type -> runtime.ExecuteJobRequest
+	7,  // 14: runtime.CoordinatorService.RegisterWorker:input_type -> runtime.RegisterWorkerRequest
+	9,  // 15: runtime.CoordinatorService.SubmitJob:input_type -> runtime.SubmitJobRequest
+	11, // 16: runtime.CoordinatorService.Heartbeat:input_type -> runtime.HeartbeatRequest
+	14, // 17: runtime.CoordinatorService.GetJob:input_type -> runtime.GetJobRequest
+	16, // 18: runtime.CoordinatorService.ListWorkers:input_type -> runtime.ListWorkersRequest
+	19, // 19: runtime.CoordinatorService.DiagnoseJob:input_type -> runtime.DiagnoseJobRequest
+	6,  // 20: runtime.WorkerService.ExecuteJob:output_type -> runtime.ExecuteJobResponse
+	8,  // 21: runtime.CoordinatorService.RegisterWorker:output_type -> runtime.RegisterWorkerResponse
+	10, // 22: runtime.CoordinatorService.SubmitJob:output_type -> runtime.SubmitJobResponse
+	12, // 23: runtime.CoordinatorService.Heartbeat:output_type -> runtime.HeartbeatResponse
+	15, // 24: runtime.CoordinatorService.GetJob:output_type -> runtime.GetJobResponse
+	17, // 25: runtime.CoordinatorService.ListWorkers:output_type -> runtime.ListWorkersResponse
+	20, // 26: runtime.CoordinatorService.DiagnoseJob:output_type -> runtime.DiagnoseJobResponse
+	20, // [20:27] is the sub-list for method output_type
+	13, // [13:20] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_proto_worker_proto_init() }
@@ -887,8 +1657,8 @@ func file_proto_worker_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_worker_proto_rawDesc), len(file_proto_worker_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   10,
+			NumEnums:      5,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

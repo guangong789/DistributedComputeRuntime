@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package runtime;
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/guangong789/DistributedComputeRuntime/proto;runtimepb";
 
 service WorkerService {
@@ -35,6 +38,10 @@ service CoordinatorService {
 
     // Read one persisted snapshot; does not submit or schedule the Job.
     rpc GetJob(GetJobRequest) returns (GetJobResponse);
+
+    // Read-only operational queries require the diagnostic Client allowlist.
+    rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+    rpc DiagnoseJob(DiagnoseJobRequest) returns (DiagnoseJobResponse);
 }
 
 message RegisterWorkerRequest {
@@ -47,6 +54,9 @@ message RegisterWorkerRequest {
     bytes registration_key = 4;
     // Last accepted Coordinator token, if any.
     bytes session_token = 5;
+    // Session-aware advertisement for a configured CUDA backend. Omit the
+    // ordinary CUDA task advertisement when using this mode.
+    bool cuda_health_managed = 6;
 }
 
 message RegisterWorkerResponse {
@@ -73,10 +83,26 @@ message SubmitJobResponse {
 message HeartbeatRequest {
   string worker_id = 1;
   bytes session_token = 2;
+  CudaHealthObservation cuda_health = 3;
 }
 
 message HeartbeatResponse {
   bool accepted = 1;
+  // Coordinator-issued, scoped to the current session. Zero means unavailable.
+  uint64 cuda_health_probe_anchor = 2;
+}
+
+enum CudaHealthState {
+  CUDA_HEALTH_STATE_UNSPECIFIED = 0;
+  CUDA_HEALTH_STATE_READY = 1;
+  CUDA_HEALTH_STATE_UNAVAILABLE = 2;
+}
+
+message CudaHealthObservation {
+  uint64 observation_seq = 1;
+  CudaHealthState state = 2;
+  // The anchor received before the check began. Never re-anchor a result.
+  uint64 probe_anchor = 3;
 }
 
 // Wire states are independent of database state numbers. UNSPECIFIED is never
@@ -106,4 +132,81 @@ message GetJobResponse {
   bool has_worker_result = 5;
   string output = 6;
   string error = 7;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+    google.protobuf.Timestamp worker_snapshot_at = 1;
+    repeated WorkerDiagnostic workers = 2;
+}
+
+enum RecordedWorkerLiveness {
+    RECORDED_WORKER_LIVENESS_UNSPECIFIED = 0;
+    RECORDED_WORKER_LIVENESS_ALIVE = 1;
+    RECORDED_WORKER_LIVENESS_DEAD = 2;
+}
+
+enum CudaEvidenceFreshness {
+    CUDA_EVIDENCE_FRESHNESS_UNSPECIFIED = 0;
+    CUDA_EVIDENCE_FRESHNESS_FRESH = 1;
+    CUDA_EVIDENCE_FRESHNESS_EXPIRED = 2;
+}
+
+message WorkerDiagnostic {
+    string worker_id = 1;
+    // Recorded status. Alive neither proves reachability nor rechecks the timeout.
+    RecordedWorkerLiveness liveness = 2;
+    // Time since the last accepted registration or heartbeat at worker_snapshot_at.
+    google.protobuf.Duration last_seen_age = 3;
+    // Recognized configured capabilities, including CUDA when advertised as managed.
+    repeated string external_task_types = 4;
+    bool cuda_health_managed = 5;
+    // UNSPECIFIED is Unknown for a managed Worker and inapplicable for unmanaged.
+    CudaHealthState effective_cuda_health = 6;
+    // UNSPECIFIED means there is no accepted managed evidence.
+    CudaEvidenceFreshness cuda_evidence_freshness = 7;
+    // Present only for fresh evidence, including fresh Unavailable.
+    google.protobuf.Duration cuda_fresh_for = 8;
+    // Current placement eligibility for known supported tasks, independent of slot occupancy.
+    repeated string eligible_task_types = 9;
+}
+
+message DiagnoseJobRequest {
+    int64 job_id = 1;
+}
+
+enum PlacementInterpretation {
+    PLACEMENT_INTERPRETATION_UNSPECIFIED = 0;
+    PLACEMENT_INTERPRETATION_NO_CONFIGURED_WORKER = 1;
+    PLACEMENT_INTERPRETATION_NO_ALIVE_WORKER = 2;
+    PLACEMENT_INTERPRETATION_NO_ELIGIBLE_WORKER = 3;
+    PLACEMENT_INTERPRETATION_ELIGIBLE_WORKER_EXISTS = 4;
+    // The durable record is terminal. No placement diagnosis applies.
+    PLACEMENT_INTERPRETATION_NOT_APPLICABLE = 5;
+    // Revalidation observed a different durable record. No placement conclusion.
+    PLACEMENT_INTERPRETATION_JOB_CHANGED = 6;
+    // A durable Running record cannot attest live Attempt or lease authority.
+    PLACEMENT_INTERPRETATION_UNKNOWN = 7;
+}
+
+message DiagnoseJobResponse {
+    // Fields 1-6 are from the first durable read. Attempt ID is the recorded
+    // generation. A Running record alone does not attest live lease authority.
+    int64 job_id = 1;
+    JobState state = 2;
+    string task_type = 3;
+    int64 attempt_id = 4;
+    string worker_id = 5;
+    bool has_worker_result = 6;
+
+    // Sampled between two durable reads. This is not a joint transaction.
+    google.protobuf.Timestamp worker_snapshot_at = 7;
+    uint32 configured_workers = 8;
+    uint32 alive_compatible_workers = 9;
+    // The pre-dispatch placement predicate, independent of execution or scheduling.
+    uint32 eligible_workers = 10;
+    // Current conditions only. Historical queue reasons, scheduler delay,
+    // cooldown and live Attempt authority cannot be determined here.
+    PlacementInterpretation interpretation = 11;
 }

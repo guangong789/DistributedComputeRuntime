@@ -33,21 +33,8 @@ func (s *CoordinatorServer) GetJob(ctx context.Context, req *runtimepb.GetJobReq
 	if !found {
 		return nil, status.Error(codes.NotFound, "job not found")
 	}
-	var state runtimepb.JobState
-	switch record.State {
-	case JobQueued:
-		state = runtimepb.JobState_JOB_STATE_QUEUED
-	case JobRunning:
-		state = runtimepb.JobState_JOB_STATE_RUNNING
-	case JobRecovering:
-		state = runtimepb.JobState_JOB_STATE_RECOVERING
-	case JobSucceeded:
-		state = runtimepb.JobState_JOB_STATE_SUCCEEDED
-	case JobFailed:
-		state = runtimepb.JobState_JOB_STATE_FAILED
-	case JobCancelled:
-		state = runtimepb.JobState_JOB_STATE_CANCELLED
-	default:
+	state := wireJobState(record.State)
+	if state == runtimepb.JobState_JOB_STATE_UNSPECIFIED {
 		return nil, status.Error(codes.Internal, "stored job state is not supported")
 	}
 	return &runtimepb.GetJobResponse{
@@ -55,4 +42,23 @@ func (s *CoordinatorServer) GetJob(ctx context.Context, req *runtimepb.GetJobReq
 		WorkerId: record.WorkerID, HasWorkerResult: record.HasWorkerResult,
 		Output: record.Output, Error: record.Error,
 	}, nil
+}
+
+func wireJobState(state JobState) runtimepb.JobState {
+	switch state {
+	case JobQueued:
+		return runtimepb.JobState_JOB_STATE_QUEUED
+	case JobRunning:
+		return runtimepb.JobState_JOB_STATE_RUNNING
+	case JobRecovering:
+		return runtimepb.JobState_JOB_STATE_RECOVERING
+	case JobSucceeded:
+		return runtimepb.JobState_JOB_STATE_SUCCEEDED
+	case JobFailed:
+		return runtimepb.JobState_JOB_STATE_FAILED
+	case JobCancelled:
+		return runtimepb.JobState_JOB_STATE_CANCELLED
+	default:
+		return runtimepb.JobState_JOB_STATE_UNSPECIFIED
+	}
 }

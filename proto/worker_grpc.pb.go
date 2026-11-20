@@ -125,6 +125,8 @@ const (
 	CoordinatorService_SubmitJob_FullMethodName      = "/runtime.CoordinatorService/SubmitJob"
 	CoordinatorService_Heartbeat_FullMethodName      = "/runtime.CoordinatorService/Heartbeat"
 	CoordinatorService_GetJob_FullMethodName         = "/runtime.CoordinatorService/GetJob"
+	CoordinatorService_ListWorkers_FullMethodName    = "/runtime.CoordinatorService/ListWorkers"
+	CoordinatorService_DiagnoseJob_FullMethodName    = "/runtime.CoordinatorService/DiagnoseJob"
 )
 
 // CoordinatorServiceClient is the client API for CoordinatorService service.
@@ -136,6 +138,9 @@ type CoordinatorServiceClient interface {
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// Read one persisted snapshot; does not submit or schedule the Job.
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*GetJobResponse, error)
+	// Read-only operational queries require the diagnostic Client allowlist.
+	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
+	DiagnoseJob(ctx context.Context, in *DiagnoseJobRequest, opts ...grpc.CallOption) (*DiagnoseJobResponse, error)
 }
 
 type coordinatorServiceClient struct {
@@ -186,6 +191,26 @@ func (c *coordinatorServiceClient) GetJob(ctx context.Context, in *GetJobRequest
 	return out, nil
 }
 
+func (c *coordinatorServiceClient) ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorkersResponse)
+	err := c.cc.Invoke(ctx, CoordinatorService_ListWorkers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coordinatorServiceClient) DiagnoseJob(ctx context.Context, in *DiagnoseJobRequest, opts ...grpc.CallOption) (*DiagnoseJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiagnoseJobResponse)
+	err := c.cc.Invoke(ctx, CoordinatorService_DiagnoseJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CoordinatorServiceServer is the server API for CoordinatorService service.
 // All implementations must embed UnimplementedCoordinatorServiceServer
 // for forward compatibility.
@@ -195,6 +220,9 @@ type CoordinatorServiceServer interface {
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// Read one persisted snapshot; does not submit or schedule the Job.
 	GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error)
+	// Read-only operational queries require the diagnostic Client allowlist.
+	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
+	DiagnoseJob(context.Context, *DiagnoseJobRequest) (*DiagnoseJobResponse, error)
 	mustEmbedUnimplementedCoordinatorServiceServer()
 }
 
@@ -216,6 +244,12 @@ func (UnimplementedCoordinatorServiceServer) Heartbeat(context.Context, *Heartbe
 }
 func (UnimplementedCoordinatorServiceServer) GetJob(context.Context, *GetJobRequest) (*GetJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetJob not implemented")
+}
+func (UnimplementedCoordinatorServiceServer) ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkers not implemented")
+}
+func (UnimplementedCoordinatorServiceServer) DiagnoseJob(context.Context, *DiagnoseJobRequest) (*DiagnoseJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiagnoseJob not implemented")
 }
 func (UnimplementedCoordinatorServiceServer) mustEmbedUnimplementedCoordinatorServiceServer() {}
 func (UnimplementedCoordinatorServiceServer) testEmbeddedByValue()                            {}
@@ -310,6 +344,42 @@ func _CoordinatorService_GetJob_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CoordinatorService_ListWorkers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoordinatorServiceServer).ListWorkers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CoordinatorService_ListWorkers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoordinatorServiceServer).ListWorkers(ctx, req.(*ListWorkersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CoordinatorService_DiagnoseJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiagnoseJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoordinatorServiceServer).DiagnoseJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CoordinatorService_DiagnoseJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoordinatorServiceServer).DiagnoseJob(ctx, req.(*DiagnoseJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CoordinatorService_ServiceDesc is the grpc.ServiceDesc for CoordinatorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -332,6 +402,14 @@ var CoordinatorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetJob",
 			Handler:    _CoordinatorService_GetJob_Handler,
+		},
+		{
+			MethodName: "ListWorkers",
+			Handler:    _CoordinatorService_ListWorkers_Handler,
+		},
+		{
+			MethodName: "DiagnoseJob",
+			Handler:    _CoordinatorService_DiagnoseJob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
